@@ -1,0 +1,344 @@
+客户端（LVGL 图形界面）
+文件依赖全图
+main.c
+│
+├── ui_manager.h ───── client/ui_manager.h
+│   └── ../lvgl/lvgl.h
+│       
+├── client/ui_manager.c
+│   ├── ui_manager.h（自身）
+│   └── network_task.h
+│       
+├── client/network_task.h
+│   └── <pthread.h>, <stdbool.h>
+│       
+└── client/network_task.c
+    ├── network_task.h（自身）
+    ├── ui_manager.h（回调函数）
+    ├── protocol.h          ← 通过 -Iclient/my_ftp/Client/inc 找到
+    └── ../lvgl/lvgl.h      ← 从 client/ 目录回退
+模块 1：main.c — 系统入口
+做什么：
+lv_init() — 初始化 LVGL 核心
+lv_linux_disp_init() — 创建 SDL 窗口（1024×600）
+ui_login_init() — 绘制登录界面
+进入死循环 lv_timer_handler() + usleep(5000) — LVGL 事件泵
+关键约束：整个程序只有一个线程在跑 lv_timer_handler()。所有对 LVGL 控件的创建、修改必须在这个循环里做，其他线程绝不能碰。
+模块 2：ui_manager.c — 界面管理层
+全局变量（.c 文件头部）：
+变量	类型	用途
+login_screen / main_screen	lv_obj_t *	两个屏幕（登录 / 主页）
+login_ip_ta 等	lv_obj_t *	登录框的文本输入区
+main_file_list	lv_obj_t *	文件列表（lv_list）
+prog_panel/bar/info	lv_obj_t *	进度浮窗组件
+g_selected_file	char[256]	用户点选的文件名
+g_transferring	bool	防止重复传输
+
+三个界面：
+A. 登录界面 — ui_login_init()
++-----------------------------------+
+|  Embedded Remote File Manager     |
+|  LVGL FTP Client                  |
+|                                   |
+|  Server IP:     [192.168.1.100_] |
+|  Port:          [___8888_______] |
+|  Username:      [___admin______] |
+|  Password:      [___****_______] |
+|                                   |
+|  [   Connect / Login   ]         |
+|  Status: Ready                    |
++-----------------------------------+
+创建过程：
+用 lv_obj_create(NULL) 创建空屏幕，深蓝背景 #1a1a2e
+标题标签（Montserrat 20，青色 #00d2ff）
+四个输入框（lv_textarea_create）：IP 默认 192.168.1.100、Port 默认 8888、Username 默认 admin、Password 默认 123456（密码模式）
+[Connect / Login] 按钮 → 绑定 on_login_btn_clicked
+状态标签（初始 "Ready"）
+lv_screen_load(login_screen) 激活
+B. 主界面 — ui_main_init()
++---------------------------------------------+
+| User: admin | SID-12345 | Connected          |
++---------------------------------------------+
+| Directory: /remote_share/                   |
++---------------------------------------------+
+|  [File List - scrollable]                    |
+|  hello.txt                                   |
+|  test_readme.txt                             |
+|  sample.bin                                  |
+|                                              |
++---------------------------------------------+
+| Selected: hello.txt                          |
++---------------------------------------------+
+| [Refresh] [Download] [Disconnect]            |
+| Upload: [local_file.txt___] [Upload]         |
++---------------------------------------------+
+创建过程：
+顶栏 main_status_bar — 显示用户、Session、连接状态
+文件列表 main_file_list — lv_list_create，初始显示 "Click "Refresh" to list files"
+main_selected_label — 显示当前选中文件
+按钮行：Refresh / Download / Disconnect
+上传行：Upload 输入框 + [Upload] 按钮
+C. 进度浮窗 — ui_show_progress()
++-----------------------------------+
+| Downloading: hello.txt  45%       |
+| [=============          ]         |
+| 2.25 MB / 5.00 MB                 |
+|                        [Cancel]   |
++-----------------------------------+
+用 lv_layer_top() 作为父对象，确保浮在最上层。
+面板（深色圆角背景）
+文件名+百分比标签
+lv_bar 进度条
+统计文字（自动判断 B/KB/MB）
+[Cancel] 按钮
+事件回调链：
+LVGL 事件	回调	调用
+点 [Connect]	on_login_btn_clicked	network_start_connect(ip,port,user,pass)
+点文件项	on_file_item_clicked	存入 g_selected_file，更新标签
+点 [Refresh]	on_refresh_btn_clicked	network_cmd_ls()
+点 [Download]	on_download_btn_clicked	network_cmd_get(g_selected_file)
+点 [Upload]	on_upload_btn_clicked	network_cmd_put(text)
+点 [Disconnect]	on_disconnect_btn_clicked	network_disconnect()
+点 [Cancel]	on_cancel_btn_clicked	network_cancel_transfer()
+
+所有 network_cmd_* 都是非阻塞的——只做一次 write(sockfd) 写 socket，立即返回，不等待服务端回应。
+模块 3：network_task.c — 网络线程（核心）
+全局变量（暴露给 UI 线程）：
+变量	类型	含义
+g_sockfd	int	当前 socket 描述符
+g_network_running	bool	网络线程是否存活
+g_login_ok	bool	登录是否成功
+g_session_info	char[64]	Session ID
+g_transfer_progress	struct	当前传输进度（UI 只读）
+
+内部状态机 g_state（文件头部 typedef enum）：
+ST_IDLE → ST_LOGIN_SENT →（登录成功）→ ST_IDLE
+→ ST_WAIT_LS_RESP（响应来了解析后自动回 ST_IDLE）
+→ ST_WAIT_GET_RESP → ST_DOWNLOADING（收完回 ST_IDLE）
+→ ST_WAIT_PUT_RESP → ST_UPLOADING（发完回 ST_IDLE）
+协议层：两个关键函数：
+read_packet(fd, &payload_len)
+  ├─ [Phase 1] do-while 逐字节 read 找 0xC0 包头
+  ├─ [Phase 2] 再读 4 字节跳出连续的 0xC0（上一个包的包尾）
+  ├─ [Phase 3] 用第一个目标字节 + 后续 3 字节拼出 pkg_len（小端）
+  ├─ [Phase 4] 逐字节读 payload，遇 0xC0 包尾停止
+  ├─ [Phase 5] 校验实际长度 == pkg_len - 6
+  └─ 返回 malloc 的 payload；调用者 free
+
+build_cmd(cmd_no, arg_data, arg_len)
+  └─ 分配 buffer → 写 0xC0 → 写小端 pkg_len → 写 cmd_no → 写 arg → 写 0xC0
+网络线程 network_thread_func() 完整流程：
+① 解析参数（ip, port, username, password）
+② socket(AF_INET, SOCK_STREAM) → connect(ip, port)
+③ 封装 LOGIN 包：0xC0 + len + cmd_no=1028 + user_len+user + pass_len+pass + 0xC0
+   write(sockfd) 发送
+④ read_packet() 等待服务端登录响应
+   ├─ 解析 cmd_no==FTP_CMD_LOGIN && res_result==1 → g_login_ok=true
+   │   └─ lv_async_call(cb_login_result) → UI 线程执行 ui_switch_to_main()
+   └─ 否则 → lv_async_call(cb_login_result) → UI 显示 "Login rejected"
+⑤ 进入主 while(g_network_running) 循环：
+   │
+   ├─ 如果 g_state == ST_DOWNLOADING：
+   │    read_n(sockfd, buf, min(4096, 剩余))
+   │    write(本地文件, buf, r)
+   │    计算百分比 → 如果百分比变了 → malloc + lv_async_call 更新进度条
+   │    收完 → close文件 → lv_async_call 关闭浮窗
+   │
+   ├─ 如果 g_state == ST_UPLOADING：
+   │    read(本地文件, buf, 4096)
+   │    write(sockfd, buf, r)
+   │    同上进度更新
+   │    发完 → close文件 → lv_async_call 关闭浮窗
+   │
+   └─ 默认（空闲）：
+        poll(sockfd, 500ms 超时) → 可读则 read_packet 获取完整协议包
+        switch(cmd_no):
+          FTP_CMD_LS(1024)  → 解析文件名列表
+                               → malloc + lv_async_call(ui_update_file_list_cb)
+          FTP_CMD_GET(1025) → 解析 filesize(4B LE)
+                               → start_download(filename, filesize)
+                               → 进入 ST_DOWNLOADING
+          FTP_CMD_PUT(1026) → 收到 ACK → start_upload(filename)
+                               → 进入 ST_UPLOADING
+          FTP_CMD_BYE(1027) → 等待断开
+⑥ 退出循环 → cleanup → close(sockfd)
+   → lv_async_call(cb_disconnected) → UI 回到登录页
+安全退出机制：network_disconnect() 发送 BYE 包后调用 shutdown(sockfd, SHUT_RDWR)，这会立刻打断网络线程中阻塞的 poll() 或 read()，使线程在下一次循环检测到 g_network_running==false 后正常退出。
+服务端（终端 TUI + 多进程）
+文件依赖全图
+server/src/main.c
+├── server/inc/protocol.h
+├── server/inc/handler.h
+│   └── server/inc/ipc_shm.h
+└── server/inc/ipc_shm.h
+
+server/src/handler.c
+├── server/inc/handler.h
+├── server/inc/protocol.h
+├── server/inc/sys_auth.h
+└── <poll.h> <dirent.h> <sys/stat.h> <fcntl.h>
+
+server/src/protocol.c
+└── server/inc/protocol.h
+
+server/src/ipc_shm.c
+└── server/inc/ipc_shm.h + <sys/ipc.h> <sys/shm.h>
+
+server/src/sys_auth.c
+└── server/inc/sys_auth.h + <sys/file.h>
+模块 1：main.c — 主进程入口 + TUI
+初始化三部曲：
+① shm_init()
+   ├─ ftok("/tmp", 0x77) 生成 key
+   ├─ shmget(key, 16*sizeof(client_info_t), IPC_CREAT|0666)
+   ├─ shmat() 挂载
+   └─ memset 清零
+
+② sigaction(SIGCHLD, sigchld_handler)
+   └─ sigchld_handler() 逻辑：
+       while(waitpid(-1, NULL, WNOHANG) > 0);  // 收尸
+
+③ server_init(ip, port)
+   ├─ socket(AF_INET, SOCK_STREAM)
+   ├─ setsockopt SO_REUSEADDR + SO_REUSEPORT
+   ├─ bind()
+   └─ listen(8)
+主循环：
+poll(listen_fd, timeout=1000ms)
+├─ 超时（每秒）：
+│   tui_refresh(g_shm)  // 清屏 + 遍历共享内存 + 打印表格
+│
+└─ 有连接：
+    accept → 拿到 cli IP + Port
+    fork()
+    ├─ 子进程：
+    │   close(listen_fd)
+    │   handle_client(confd, ip, port, g_shm)
+    │   _exit(0)
+    └─ 父进程：
+        close(confd)  // 自己不持有
+        继续 poll
+TUI 表格输出（每秒刷新）：
+============================================================
+  [ Embedded Remote File Manager - Server Monitor ]
+  Server: 0.0.0.0  |  Port: 8888  |  Status: Running
+============================================================
+ [Online Clients: 2 / 16]
+------------------------------------------------------------
+ PID      | Client IP      | Port   | Current State
+------------------------------------------------------------
+ 27901    | 127.0.0.1      | 54321  | Online              ← 绿色
+ 27989    | 127.0.0.1      | 54322  | Downloading         ← 黄色
+------------------------------------------------------------
+ [10:30:45] Server running. Press Ctrl+C to stop.
+============================================================
+颜色通过 ANSI 转义码实现：Idle/Online = \033[0;32m（绿），Downloading = \033[0;33m（黄），Uploading = \033[0;31m（红）。
+模块 2：handler.c — 子进程状态机
+状态定义：
+typedef enum { ST_IDLE, ST_UPLOADING } handler_state_t;
+handle_client() 完整流程：
+进入 → poll(confd, timeout=1000ms)
+│
+├── poll 出错或 POLLRDHUP/POLLHUP → break → 清理退出
+│
+├── 状态 == ST_UPLOADING：
+│   │  计算剩余字节 → read(confd, buf, min(4096,剩余))
+│   │  write(本地文件, buf, n)
+│   │  ul_received += n
+│   │  如果收完 → close(fd) → shm_update_status("Idle") → 切回 ST_IDLE
+│   └  continue
+│
+└── 状态 == ST_IDLE：
+    read_packet(confd) → 拿到完整协议包
+    cmd_no = get_le32(payload)
+    switch(cmd_no)：
+五个命令处理函数：
+A. handle_login() — 鉴权
+payload = [4B cmd_no(user_len)] [user] [4B pass_len] [pass]
+├─ 提取 username/password
+├─ verify_user(username, password)
+│   └─ open("./users.conf", O_RDONLY)
+│      → flock(fd, LOCK_SH)  // 共享锁，多进程可并发读
+│      → 逐行读，按 ":" 分割比较
+│      → flock(fd, LOCK_UN) + close(fd)
+│      → 匹配返回 0，否则 -1
+├─ 匹配成功：
+│   send_packet(confd, FTP_CMD_LOGIN, res=1, session_id)
+│   shm_add_client(shm, getpid(), ip, port, "Online")
+└─ 失败：
+    send_packet(confd, FTP_CMD_LOGIN, res=0, "auth failed")
+B. handle_ls() — 文件列表
+opendir("./remote_share")
+while(readdir) → 跳过 "." ".." → snprintf 拼合 "name\n"
+send_packet(confd, FTP_CMD_LS, res=1, filebuf)
+C. handle_get() — 文件下载
+解析 payload 拿到 filename
+path = "./remote_share/" + filename
+stat(path) → 获得 st.st_size
+┌─ 先发协议包：
+│   size_le = put_le32(st.st_size)
+│   send_packet(confd, FTP_CMD_GET, res=1, size_le, 4)
+│   ★ 这一个 write 写完，0xC0 包尾已发送
+└─ 再发裸数据流：
+    open(path, O_RDONLY)
+    while(sent < st.st_size) {
+        read(fd, buf, 4096) → write(confd, buf, r)
+    }
+    close(fd)
+    ★ 此时 socket 上只有文件二进制，没有 0xC0
+D. handle_put() — 文件上传
+解析 payload 拿到 filename
+path = "./remote_share/" + filename
+open(path, O_WRONLY|O_CREAT|O_TRUNC, 0666)
+send_packet(confd, FTP_CMD_PUT, res=1, NULL)   // 先发 ACK
+*out_fd = fd                                     // 把 fd 传回主循环
+shm_update_status(shm, pid, "Uploading")
+// 主循环检测到 *out_fd >= 0 → state = ST_UPLOADING
+// 接下来的 poll 循环走裸读分支，直接 read(confd) → write(fd)
+E. handle_bye() — 断开
+shm_remove_client(shm, pid)        // 共享内存标记 inactive
+shutdown(confd, SHUT_RDWR)
+close(confd)
+exit(0)
+模块 3：protocol.c — 协议层
+read_packet(fd) 与客户端的完全对称——逐字节找 0xC0 → 读 4 字节小端 pkg_len → 读 payload 遇 0xC0 停 → 长度校验。为防止客户端的 read_packet 把文件内容误认成协议包，服务端在 GET 发完协议包之后再发裸数据流，且 PUT 的上传阶段也走裸读分支，不调用 read_packet。
+send_packet(fd, cmd_no, res_result, data, data_len) — 构建响应包：
+wire = 0xC0 + pkg_len(4B LE) + cmd_no(4B LE) +
+        res_len(4B LE) + res_result(1B) + data + 0xC0
+write(fd, wire, pkg_len)
+模块 4：ipc_shm.c — 共享内存
+shm_init()
+  ├─ ftok("/tmp", 0x77) → shmget(IPC_CREAT|0666) → shmat
+  └─ 返回 client_info_t * （指向 16 个槽位）
+
+shm_add_client(shm, pid, ip, port, status)
+  └─ 遍历 16 个 slot，找 active==false 的写入
+
+shm_update_status(shm, pid, status)
+  └─ 遍历，匹配 pid 后覆盖 status 字段
+
+shm_remove_client(shm, pid)
+  └─ 遍历，匹配后置 active=false
+模块 5：sys_auth.c — 文件锁鉴权
+verify_user(username, password)
+  ├─ open("./users.conf", O_RDONLY)
+  ├─ flock(fd, LOCK_SH)           // 多子进程共享锁不互斥
+  ├─ 逐字符读行，用 ":" 分割比较
+  ├─ 匹配 → return 0
+  ├─ 不匹配 → return -1
+  └─ flock(fd, LOCK_UN) + close(fd)
+users.conf 格式（一行一个）：
+admin:123456
+user:pass
+root:root
+test:test
+核心对称性：客户端 vs 服务端
+层面	客户端	服务端
+read_packet	逐字节 0xC0 → 4B LE pkg_len → payload → 0xC0	完全相同的代码逻辑
+send_packet	build_cmd()	send_packet() 函数
+GET 流程	先收协议包（filesize）→ 再收裸二进制	先发协议包 → 再发裸二进制，write 之间无 0xC0
+PUT 流程	先发协议包（请求）→ 收 ACK → 发裸二进制	先收协议包（请求）→ 发 ACK → 进入 ST_UPLOADING 裸收
+cmd_no	LOGIN=1028, LS=1024, GET=1025, PUT=1026, BYE=1027	完全一致
+小端编码	put_le32(val) = val & 0xFF / (val>>8) & 0xFF / …	put_le32(val) 宏完全相同
+线程/进程	双线程（UI + 网络）	多进程（主 + 子进程）
+可视化	LVGL SDL 窗口	终端 TUI（ANSI 颜色 + 清屏重绘）
