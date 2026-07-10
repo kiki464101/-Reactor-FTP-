@@ -2,7 +2,7 @@
 #define SERVER_PROTOCOL_H
 
 #define SIZE 4096
-#define MY_FTP_BOOT "./remote_share"
+#define MY_FTP_BOOT "./copy"
 
 typedef enum {
     FTP_CMD_LS    = 1024,

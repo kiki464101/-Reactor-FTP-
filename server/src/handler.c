@@ -32,7 +32,7 @@
 static void handle_login(int confd, const unsigned char *payload,
                          int plen, const char *ip, int port,
                          client_info_t *shm);
-static void handle_ls(int confd);
+static void handle_ls(int confd, client_info_t *shm);
 static void handle_get(int confd, const unsigned char *payload, int plen,
                        client_info_t *shm);
 static void handle_put(int confd, const unsigned char *payload, int plen,
@@ -115,7 +115,7 @@ void handle_client(int confd, const char *ip, int port, client_info_t *shm)
             handle_login(confd, payload, plen, ip, port, shm);
             break;
         case FTP_CMD_LS:
-            handle_ls(confd);
+            handle_ls(confd, shm);
             break;
         case FTP_CMD_GET:
             handle_get(confd, payload, plen, shm);
@@ -202,20 +202,23 @@ static void handle_login(int confd, const unsigned char *payload,
 /* ------------------------------------------------------------------ */
 /*  LS – list directory                                               */
 /* ------------------------------------------------------------------ */
-static void handle_ls(int confd)
+static void handle_ls(int confd, client_info_t *shm)
 {
+    int my_pid = getpid();
+    shm_update_status(shm, my_pid, "Refreshing...");
+
     char filebuf[SIZE] = {0};
     int  off = 0;
 
     DIR *dir = opendir(MY_FTP_BOOT);
     if (!dir) {
         send_packet(confd, FTP_CMD_LS, 0, (unsigned char *)"opendir fail", 12);
+        shm_update_status(shm, my_pid, "Online");
         return;
     }
 
     struct dirent *d;
     while ((d = readdir(dir)) != NULL) {
-        /* skip "." and ".." */
         if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
             continue;
         off += snprintf(filebuf + off, sizeof(filebuf) - (size_t)off - 1,
@@ -225,6 +228,8 @@ static void handle_ls(int confd)
 
     send_packet(confd, FTP_CMD_LS, 1,
                 (unsigned char *)filebuf, off);
+
+    shm_update_status(shm, my_pid, "Online");
 }
 
 /* ------------------------------------------------------------------ */

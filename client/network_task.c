@@ -295,6 +295,7 @@ static void cb_dl_done(void *data)
     str_data_t *d = (str_data_t *)data;
     ui_hide_progress();
     ui_set_status(d ? d->text : "Download complete");
+    ui_restore_status_after_delay();
     free(d);
 }
 
@@ -314,7 +315,8 @@ static void cb_ul_done(void *data)
 {
     str_data_t *d = (str_data_t *)data;
     ui_hide_progress();
-    ui_set_status(d ? d->text : "Upload complete");
+    ui_set_status(d ? d->text : "Uploaded");
+    ui_restore_status_after_delay();
     free(d);
 }
 
@@ -329,7 +331,10 @@ static void start_download(const char *filename, int filesize)
     g_last_progress = -1;
 
     /* create / truncate local file */
-    g_dl_fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    mkdir("./load", 0755);
+    char dl_path[520];
+    snprintf(dl_path, sizeof(dl_path), "./load/%s", filename);
+    g_dl_fd = open(dl_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (g_dl_fd < 0) {
         str_data_t *err = make_str_data("Failed to create local file");
         if (err) lv_async_call(cb_error, err);
@@ -385,7 +390,7 @@ static void finish_download(bool success)
     g_state = ST_IDLE;
 
     str_data_t *msg = make_str_data(success
-        ? "Download finished"
+        ? "Downloaded"
         : "Download failed");
     if (msg) lv_async_call(cb_dl_done, msg);
 }
@@ -397,7 +402,10 @@ static void start_upload(const char *filename)
 {
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
 
-    g_ul_fd = open(filename, O_RDONLY);
+    mkdir("./copy", 0755);
+    char ul_path[520];
+    snprintf(ul_path, sizeof(ul_path), "./copy/%s", filename);
+    g_ul_fd = open(ul_path, O_RDONLY);
     if (g_ul_fd < 0) {
         str_data_t *err = make_str_data("Local file not found");
         if (err) lv_async_call(cb_error, err);
@@ -459,7 +467,7 @@ static void finish_upload(bool success)
     g_state = ST_IDLE;
 
     str_data_t *msg = make_str_data(success
-        ? "Upload finished"
+        ? "Uploaded"
         : "Upload failed");
     if (msg) lv_async_call(cb_ul_done, msg);
 }
@@ -773,7 +781,9 @@ bool network_cmd_put(const char *filename)
 
     /* get local file size — also verifies the file exists */
     struct stat st;
-    if (stat(filename, &st) != 0) {
+    char ul_stat_path[520];
+    snprintf(ul_stat_path, sizeof(ul_stat_path), "./copy/%s", filename);
+    if (stat(ul_stat_path, &st) != 0) {
         /* file doesn't exist or can't be accessed */
         return false;
     }

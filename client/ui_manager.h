@@ -49,4 +49,16 @@ void ui_show_error(const char *msg);
 /* ------------------------------------------------------------------ */
 void ui_update_file_list_cb(void *data);   /* data = malloc'd char* */
 
+/* async callback: update local file list from scan result */
+void ui_update_local_file_list_cb(void *data);
+
+/* scan local working directory and refresh the local file list via async call */
+void ui_refresh_local_files(void);
+
+/* restore status bar to connected state after a short delay */
+void ui_restore_status_after_delay(void);
+
+/* show a centered popup with a Close button (for errors like "file unexist") */
+void ui_show_error_popup(const char *msg);
+
 #endif /* UI_MANAGER_H */
