@@ -1,0 +1,16 @@
+# 编译产物
+bin/
+build/
+*.o
+*.a
+*.so
+*.out
+*.exe
+
+# IDE 相关
+.vscode/
+.idea/
+
+# 其他
+*.log
+*.tmp
