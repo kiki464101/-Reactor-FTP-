@@ -6,12 +6,17 @@
 #include <unistd.h>
 #include <sys/file.h>   /* flock */
 
-#define AUTH_FILE "./users.conf"
+/* Try current directory first; fall back to ../server/ when run from bin/ */
+#define AUTH_FILE_CWD  "./users.conf"
+#define AUTH_FILE_ALT  "../server/users.conf"
 #define LINE_MAX 256
 
 int verify_user(const char *username, const char *password)
 {
-    int fd = open(AUTH_FILE, O_RDONLY);
+    int fd = open(AUTH_FILE_CWD, O_RDONLY);
+    if (fd < 0) {
+        fd = open(AUTH_FILE_ALT, O_RDONLY);
+    }
     if (fd < 0) { perror("open users.conf"); return -1; }
 
     /* shared lock – multiple children can read concurrently */

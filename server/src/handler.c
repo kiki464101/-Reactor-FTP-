@@ -33,9 +33,11 @@ static void handle_login(int confd, const unsigned char *payload,
                          int plen, const char *ip, int port,
                          client_info_t *shm);
 static void handle_ls(int confd);
-static void handle_get(int confd, const unsigned char *payload, int plen);
+static void handle_get(int confd, const unsigned char *payload, int plen,
+                       client_info_t *shm);
 static void handle_put(int confd, const unsigned char *payload, int plen,
-                       int *out_pid, client_info_t *shm);
+                       int *out_fd, int *out_total, char *out_filename,
+                       size_t filename_sz, client_info_t *shm);
 static void handle_bye(int confd, client_info_t *shm);
 
 /* ------------------------------------------------------------------ */
@@ -50,9 +52,10 @@ void handle_client(int confd, const char *ip, int port, client_info_t *shm)
     int   ul_fd        = -1;
     int   ul_total     = 0;
     int   ul_received  = 0;
+    int   ul_last_pct  = -1;
     char  ul_filename[256] = {0};
 
-    struct pollfd pfd = { .fd = confd, .events = POLLIN };
+    struct pollfd pfd = { .fd = confd, .events = POLLIN | POLLRDHUP };
 
     while (1) {
         int r = poll(&pfd, 1, 1000);
@@ -85,6 +88,15 @@ void handle_client(int confd, const char *ip, int port, client_info_t *shm)
             if (n <= 0) break;
             write(ul_fd, buf, (size_t)n);
             ul_received += n;
+
+            /* update shm status every ~10% */
+            int pct = (ul_total > 0) ? (ul_received * 100 / ul_total) : 0;
+            if (pct - ul_last_pct >= 10) {
+                ul_last_pct = pct;
+                char stbuf[64];
+                snprintf(stbuf, sizeof(stbuf), "Uploading %d%%", pct);
+                shm_update_status(shm, my_pid, stbuf);
+            }
             continue;
         }
 
@@ -106,14 +118,16 @@ void handle_client(int confd, const char *ip, int port, client_info_t *shm)
             handle_ls(confd);
             break;
         case FTP_CMD_GET:
-            handle_get(confd, payload, plen);
+            handle_get(confd, payload, plen, shm);
             break;
         case FTP_CMD_PUT:
             handle_put(confd, payload, plen,
-                       &ul_fd, shm);
+                       &ul_fd, &ul_total, ul_filename,
+                       sizeof(ul_filename), shm);
             if (ul_fd >= 0) {
+                ul_received = 0;
+                ul_last_pct = -1;
                 state = ST_UPLOADING;
-                /* filename and total should be set by handle_put */
             }
             break;
         case FTP_CMD_BYE:
@@ -147,11 +161,17 @@ static void handle_login(int confd, const unsigned char *payload,
     /* payload = [4B cmd_no] [4B user_len] [user] [4B pass_len] [pass] */
     if (plen < 12) { send_packet(confd, FTP_CMD_LOGIN, 0, NULL, 0); return; }
 
-    int  user_len  = get_le32(payload + 4);
-    int  pass_len  = get_le32(payload + 8 + user_len);
+    int user_len = get_le32(payload + 4);
 
-    /* bounds check */
-    if (user_len < 1 || pass_len < 1 ||
+    /* validate user_len BEFORE using it to read pass_len (prevents OOB) */
+    if (user_len < 1 || user_len > 63 || 8 + user_len + 4 > plen) {
+        send_packet(confd, FTP_CMD_LOGIN, 0, NULL, 0);
+        return;
+    }
+
+    int pass_len = get_le32(payload + 8 + user_len);
+
+    if (pass_len < 1 || pass_len > 63 ||
         8 + user_len + 4 + pass_len > plen) {
         send_packet(confd, FTP_CMD_LOGIN, 0, NULL, 0);
         return;
@@ -210,20 +230,25 @@ static void handle_ls(int confd)
 /* ------------------------------------------------------------------ */
 /*  GET – send file size packet, then raw stream                     */
 /* ------------------------------------------------------------------ */
-static void handle_get(int confd, const unsigned char *payload, int plen)
+static void handle_get(int confd, const unsigned char *payload, int plen,
+                       client_info_t *shm)
 {
-    /* payload = [4B cmd_no] [4B arg_len] [filename…] */
-    if (plen < 8) { send_packet(confd, FTP_CMD_GET, 0, NULL, 0); return; }
+    /* payload = [4B cmd_no] [4B arg_len] [4B name_len] [filename…]
+     *   where arg_len = 4 + actual_name_len  (the 4 is the name_len prefix) */
+    if (plen < 12) { send_packet(confd, FTP_CMD_GET, 0, NULL, 0); return; }
 
-    int arg_len = get_le32(payload + 4);
-    if (arg_len < 1 || 8 + arg_len > plen) {
+    int arg_len  = get_le32(payload + 4);
+    int name_len = get_le32(payload + 8);   /* actual filename length */
+
+    if (name_len < 1 || 12 + name_len > plen) {
         send_packet(confd, FTP_CMD_GET, 0, NULL, 0);
         return;
     }
 
     char filename[256];
-    memcpy(filename, payload + 8, (size_t)(arg_len < 255 ? arg_len : 255));
-    filename[arg_len < 255 ? arg_len : 255] = '\0';
+    int copy_len = (name_len < 255) ? name_len : 255;
+    memcpy(filename, payload + 12, (size_t)copy_len);
+    filename[copy_len] = '\0';
 
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", MY_FTP_BOOT, filename);
@@ -240,44 +265,74 @@ static void handle_get(int confd, const unsigned char *payload, int plen)
     put_le32(size_le, (int)st.st_size);
     send_packet(confd, FTP_CMD_GET, 1, size_le, 4);
 
+    /* update shm status: "Downloading" */
+    int my_pid = getpid();
+    shm_update_status(shm, my_pid, "Downloading");
+
     /* send raw file content */
     int fd = open(path, O_RDONLY);
-    if (fd < 0) return;
-
-    int my_pid = getpid();
-    /* Note: shm pointer not passed to this static fn; we could update
-       via a global if needed – for now status update is optional here */
+    if (fd < 0) {
+        shm_update_status(shm, my_pid, "Idle");
+        return;
+    }
 
     unsigned char buf[4096];
-    int sent = 0;
-    while (sent < st.st_size) {
+    int  sent       = 0;
+    int  last_pct   = -1;
+    int  total      = (int)st.st_size;
+
+    while (sent < total) {
         int r = (int)read(fd, buf, sizeof(buf));
         if (r <= 0) break;
         write(confd, buf, (size_t)r);
         sent += r;
+
+        /* update shm status every ~10% to avoid thrashing */
+        int pct = (total > 0) ? (sent * 100 / total) : 0;
+        if (pct - last_pct >= 10) {
+            last_pct = pct;
+            char stbuf[64];
+            snprintf(stbuf, sizeof(stbuf), "Downloading %d%%", pct);
+            shm_update_status(shm, my_pid, stbuf);
+        }
     }
     close(fd);
+
+    /* restore status to Idle after transfer */
+    shm_update_status(shm, my_pid, "Idle");
 }
 
 /* ------------------------------------------------------------------ */
 /*  PUT – ack, then enter UPLOADING state                             */
+/*  Protocol payload:                                                 */
+/*    [4B cmd_no] [4B arg_len] [4B name_len] [filename] [4B filesize] */
 /* ------------------------------------------------------------------ */
 static void handle_put(int confd, const unsigned char *payload, int plen,
-                       int *out_fd, client_info_t *shm)
+                       int *out_fd, int *out_total, char *out_filename,
+                       size_t filename_sz, client_info_t *shm)
 {
-    /* payload = [4B cmd_no] [4B arg_len] [filename…] */
-    if (plen < 8) { send_packet(confd, FTP_CMD_PUT, 0, NULL, 0); return; }
+    /* minimum: cmd_no(4) + arg_len(4) + name_len(4) + filesize(4) = 16 */
+    if (plen < 16) { send_packet(confd, FTP_CMD_PUT, 0, NULL, 0); return; }
 
-    int arg_len = get_le32(payload + 4);
-    if (arg_len < 1 || 8 + arg_len > plen) {
+    int arg_len  = get_le32(payload + 4);
+    int name_len = get_le32(payload + 8);
+
+    /* arg_len must cover name_len(4B prefix) + name + filesize(4B) */
+    if (name_len < 1 || 8 + 4 + name_len + 4 > plen) {
         send_packet(confd, FTP_CMD_PUT, 0, NULL, 0);
         return;
     }
 
+    /* extract filename */
     char filename[256];
-    memcpy(filename, payload + 8, (size_t)(arg_len < 255 ? arg_len : 255));
-    filename[arg_len < 255 ? arg_len : 255] = '\0';
+    int copy_len = (name_len < 255) ? name_len : 255;
+    memcpy(filename, payload + 12, (size_t)copy_len);
+    filename[copy_len] = '\0';
 
+    /* extract filesize (4-byte LE after filename) */
+    int filesize = get_le32(payload + 12 + name_len);
+
+    /* build output path */
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", MY_FTP_BOOT, filename);
 
@@ -293,13 +348,19 @@ static void handle_put(int confd, const unsigned char *payload, int plen,
     /* send ACK */
     send_packet(confd, FTP_CMD_PUT, 1, NULL, 0);
 
+    /* output upload metadata to caller */
     *out_fd = fd;
-    /* The caller (handle_client) will set state = ST_UPLOADING.
-       Upload size is unknown at this point; we rely on the client
-       closing the connection or sending an EOF.  For production,
-       the protocol could send filesize here. */
+    *out_total = filesize;
+    if (out_filename && filename_sz > 0) {
+        strncpy(out_filename, filename, filename_sz - 1);
+        out_filename[filename_sz - 1] = '\0';
+    }
+
+    /* update shared memory */
     int my_pid = getpid();
     shm_update_status(shm, my_pid, "Uploading");
+
+    printf("[%d] Receiving upload: %s (%d bytes)\n", my_pid, filename, filesize);
 }
 
 /* ------------------------------------------------------------------ */

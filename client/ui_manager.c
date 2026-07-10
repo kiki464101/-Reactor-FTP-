@@ -41,6 +41,8 @@ static lv_obj_t *prog_panel   = NULL;
 static lv_obj_t *prog_label   = NULL;
 static lv_obj_t *prog_bar     = NULL;
 static lv_obj_t *prog_info    = NULL;
+/* on-screen keyboard (shared) */
+static lv_obj_t *kb = NULL;
 
 /* ---- transfer-in-progress flag (prevent double-click) ---- */
 static bool g_transferring = false;
@@ -58,6 +60,8 @@ static void on_download_btn_clicked(lv_event_t *e);
 static void on_upload_btn_clicked(lv_event_t *e);
 static void on_disconnect_btn_clicked(lv_event_t *e);
 static void on_cancel_btn_clicked(lv_event_t *e);
+static void on_ta_focused(lv_event_t *e);
+static void on_keyboard_event(lv_event_t *e);
 
 /* ================================================================== */
 /*  Helper: create a simple button with text on a given parent        */
@@ -102,63 +106,87 @@ void ui_login_init(void)
     lv_obj_set_style_text_align(login_title, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(login_title, lv_color_hex(0x00d2ff), 0);
     lv_obj_set_style_text_font(login_title, &lv_font_montserrat_20, 0);
-    lv_obj_align(login_title, LV_ALIGN_TOP_MID, 0, 30);
+    lv_obj_align(login_title, LV_ALIGN_TOP_MID, 0, 20);
 
-    lv_coord_t cx;  /* screen centre x */
-    lv_coord_t sy;  /* current y offset */
+    /* ---- form container ---- */
     lv_obj_t *cont = lv_obj_create(login_screen);
-    lv_obj_set_size(cont, 340, 360);
+    lv_obj_set_size(cont, 380, 420);
     lv_obj_center(cont);
     lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_style_pad_all(cont, 8, 0);
     lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
 
     /* ---- IP ---- */
     lv_obj_t *lbl1 = lv_label_create(cont);
     lv_label_set_text(lbl1, "Server IP");
     lv_obj_set_style_text_color(lbl1, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_margin_top(lbl1, 6, 0);
 
     login_ip_ta = lv_textarea_create(cont);
     lv_obj_set_size(login_ip_ta, TA_W, TA_H);
-    lv_textarea_set_placeholder_text(login_ip_ta, "192.168.1.100");
-    lv_textarea_set_text(login_ip_ta, "192.168.1.100");
+    lv_textarea_set_one_line(login_ip_ta, true);
+    lv_textarea_set_cursor_click_pos(login_ip_ta, true);
+    lv_textarea_set_max_length(login_ip_ta, 32);
+    lv_textarea_set_placeholder_text(login_ip_ta, "127.0.0.1");
+    lv_textarea_set_text(login_ip_ta, "127.0.0.1");
+    lv_obj_add_event_cb(login_ip_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(login_ip_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
 
     /* ---- Port ---- */
     lv_obj_t *lbl2 = lv_label_create(cont);
     lv_label_set_text(lbl2, "Port");
     lv_obj_set_style_text_color(lbl2, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_margin_top(lbl2, 6, 0);
 
     login_port_ta = lv_textarea_create(cont);
     lv_obj_set_size(login_port_ta, TA_W, TA_H);
+    lv_textarea_set_one_line(login_port_ta, true);
+    lv_textarea_set_cursor_click_pos(login_port_ta, true);
+    lv_textarea_set_max_length(login_port_ta, 8);
     lv_textarea_set_placeholder_text(login_port_ta, "8888");
     lv_textarea_set_text(login_port_ta, "8888");
+    lv_obj_add_event_cb(login_port_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(login_port_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
 
     /* ---- Username ---- */
     lv_obj_t *lbl3 = lv_label_create(cont);
     lv_label_set_text(lbl3, "Username");
     lv_obj_set_style_text_color(lbl3, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_margin_top(lbl3, 6, 0);
 
     login_user_ta = lv_textarea_create(cont);
     lv_obj_set_size(login_user_ta, TA_W, TA_H);
+    lv_textarea_set_one_line(login_user_ta, true);
+    lv_textarea_set_cursor_click_pos(login_user_ta, true);
+    lv_textarea_set_max_length(login_user_ta, 32);
     lv_textarea_set_placeholder_text(login_user_ta, "admin");
     lv_textarea_set_text(login_user_ta, "admin");
+    lv_obj_add_event_cb(login_user_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(login_user_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
 
     /* ---- Password ---- */
     lv_obj_t *lbl4 = lv_label_create(cont);
     lv_label_set_text(lbl4, "Password");
     lv_obj_set_style_text_color(lbl4, lv_color_hex(0xcccccc), 0);
+    lv_obj_set_style_margin_top(lbl4, 6, 0);
 
     login_pass_ta = lv_textarea_create(cont);
     lv_obj_set_size(login_pass_ta, TA_W, TA_H);
+    lv_textarea_set_one_line(login_pass_ta, true);
+    lv_textarea_set_cursor_click_pos(login_pass_ta, true);
+    lv_textarea_set_max_length(login_pass_ta, 32);
+    lv_textarea_set_password_mode(login_pass_ta, true);
     lv_textarea_set_placeholder_text(login_pass_ta, "password");
     lv_textarea_set_text(login_pass_ta, "123456");
-    lv_textarea_set_password_mode(login_pass_ta, true);
+    lv_obj_add_event_cb(login_pass_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(login_pass_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
 
-    /* small spacer */
+    /* ---- spacer ---- */
     lv_obj_t *sp = lv_obj_create(cont);
-    lv_obj_set_size(sp, 1, 8);
+    lv_obj_set_size(sp, 1, 10);
     lv_obj_set_style_bg_opa(sp, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(sp, 0, 0);
 
@@ -177,6 +205,7 @@ void ui_login_init(void)
     login_status = lv_label_create(cont);
     lv_label_set_text(login_status, "Ready");
     lv_obj_set_style_text_color(login_status, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_margin_top(login_status, 6, 0);
 
     lv_screen_load(login_screen);
 }
@@ -295,10 +324,12 @@ void ui_main_init(void)
     lv_obj_set_size(main_upload_ta, 180, 32);
     lv_textarea_set_placeholder_text(main_upload_ta, "local_file.txt");
     lv_obj_set_style_pad_left(main_upload_ta, 4, 0);
+    lv_obj_add_event_cb(main_upload_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(main_upload_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
 
     create_btn(upload_row, "Upload", 90, 32, on_upload_btn_clicked);
 
-    /* load the screen (don't switch automatically â€?ui_switch_to_main does it) */
+    /* load the screen (don't switch automatically ï¿½?ui_switch_to_main does it) */
 }
 
 /* ================================================================== */
@@ -455,7 +486,7 @@ void ui_show_error(const char *msg)
 }
 
 /* ================================================================== */
-/*  Event handlers â€?main screen buttons                              */
+/*  Event handlers ï¿½?main screen buttons                              */
 /* ================================================================== */
 
 static void on_file_item_clicked(lv_event_t *e)
@@ -523,8 +554,39 @@ static void on_cancel_btn_clicked(lv_event_t *e)
     network_cancel_transfer();
 }
 
+/* Show an on-screen keyboard when a textarea gains focus or is clicked. */
+static void on_ta_focused(lv_event_t *e)
+{
+    lv_obj_t *ta = lv_event_get_target(e);
+    if (!ta) return;
+
+    if (!kb) {
+        /* create keyboard as a child of the top layer so it appears above screens */
+        lv_obj_t *parent = lv_layer_top();
+        kb = lv_keyboard_create(parent);
+        lv_obj_add_event_cb(kb, on_keyboard_event, LV_EVENT_ALL, NULL);
+        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    /* attach keyboard to this textarea and show it */
+    lv_keyboard_set_textarea(kb, ta);
+    lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
+}
+
+/* Keyboard events: hide keyboard on cancel/ready and detach textarea */
+static void on_keyboard_event(lv_event_t *e)
+{
+    lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_CANCEL || code == LV_EVENT_READY) {
+        if (kb) {
+            lv_keyboard_set_textarea(kb, NULL);
+            lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+}
+
 /* ================================================================== */
-/*  Async callback â€?update file list from network thread             */
+/*  Async callback ï¿½?update file list from network thread             */
 /* ================================================================== */
 void ui_update_file_list_cb(void *data)
 {

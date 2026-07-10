@@ -35,6 +35,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/poll.h>
 #include <netinet/in.h>
@@ -200,6 +201,24 @@ static unsigned char *build_cmd_with_str(int cmd_no, const char *str,
     return pkt;
 }
 
+/** Build a PUT command with filename AND filesize.
+ *  Protocol: [4B cmd_no] [4B arg_len] [4B name_len] [filename] [4B filesize]
+ */
+static unsigned char *build_cmd_put(const char *filename, int filesize,
+                                     int *out_len)
+{
+    int slen = (int)strlen(filename);
+    int arg_len = 4 + slen + 4;               /* name_len(4) + name + filesize(4) */
+    unsigned char *arg = (unsigned char *)malloc((size_t)arg_len);
+    if (!arg) return NULL;
+    put_le32(arg,      slen);                  /* name_len prefix */
+    memcpy(arg + 4, filename, (size_t)slen);   /* filename data */
+    put_le32(arg + 4 + slen, filesize);        /* filesize (4-byte LE) */
+    unsigned char *pkt = build_cmd(FTP_CMD_PUT, arg, arg_len, out_len);
+    free(arg);
+    return pkt;
+}
+
 /* ------------------------------------------------------------------ */
 /*  Parse a response packet                                           */
 /* ------------------------------------------------------------------ */
@@ -241,7 +260,10 @@ static void cb_login_result(void *data)
     if (g_login_ok) {
         ui_switch_to_main();
     } else {
-        ui_set_status(d ? d->text : "Login failed");
+        /* ui_show_error covers both screens and re-enables login button
+         * when we're still on the login screen (ui_set_status only
+         * targets main_status_bar which doesn't exist yet). */
+        ui_show_error(d ? d->text : "Login failed");
     }
     free(d);
 }
@@ -325,14 +347,21 @@ static void start_download(const char *filename, int filesize)
 
     g_state = ST_DOWNLOADING;
 
-    /* show progress dialog */
-    ui_show_progress(filename, false);
+    /* show progress dialog — must go through async call (UI thread safety) */
+    show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
+    if (spd) {
+        strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
+        spd->filename[sizeof(spd->filename) - 1] = '\0';
+        spd->is_upload = false;
+        lv_async_call(cb_show_progress, spd);
+    }
 }
 
 static void update_dl_progress(void)
 {
     int pct = (g_dl_total > 0) ? (g_dl_received * 100 / g_dl_total) : 0;
-    if (pct == g_last_progress) return;   /* skip duplicate */
+    /* update every 2% increment (or at 100% final), avoid flooding async calls */
+    if (pct - g_last_progress < 2 && pct < 100) return;
     g_last_progress = pct;
 
     transfer_progress_t *tp = (transfer_progress_t *)malloc(sizeof(transfer_progress_t));
@@ -391,13 +420,22 @@ static void start_upload(const char *filename)
     g_last_progress = -1;
 
     g_state = ST_UPLOADING;
-    ui_show_progress(filename, true);
+
+    /* show progress dialog — must go through async call (UI thread safety) */
+    show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
+    if (spd) {
+        strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
+        spd->filename[sizeof(spd->filename) - 1] = '\0';
+        spd->is_upload = true;
+        lv_async_call(cb_show_progress, spd);
+    }
 }
 
 static void update_ul_progress(void)
 {
     int pct = (g_ul_total > 0) ? (g_ul_sent * 100 / g_ul_total) : 0;
-    if (pct == g_last_progress) return;
+    /* update every 2% increment (or at 100% final), avoid flooding async calls */
+    if (pct - g_last_progress < 2 && pct < 100) return;
     g_last_progress = pct;
 
     transfer_progress_t *tp = (transfer_progress_t *)malloc(sizeof(transfer_progress_t));
@@ -472,11 +510,14 @@ void *network_thread_func(void *arg)
 
     /* ---- parse connection parameters ---- */
     if (arg) {
-        const char **params = (const char **)arg;
+        char **params = (char **)arg;
         if (params[0]) strncpy(ip,       params[0], sizeof(ip) - 1);
         if (params[1]) strncpy(port,     params[1], sizeof(port) - 1);
         if (params[2]) strncpy(username, params[2], sizeof(username) - 1);
         if (params[3]) strncpy(password, params[3], sizeof(password) - 1);
+        /* free now — we've copied everything to local buffers */
+        free(params[0]); free(params[1]); free(params[2]); free(params[3]);
+        free(params);
     }
 
     /* ---- create socket and connect ---- */
@@ -626,7 +667,7 @@ void *network_thread_func(void *arg)
             break;
 
         case FTP_CMD_BYE:
-            /* server acknowledges �?we'll disconnect on our side */
+            /* server acknowledges �?we'll disconnect on our side */
             break;
 
         default:
@@ -658,11 +699,14 @@ bool network_start_connect(const char *ip, const char *port,
 {
     if (g_network_running) return false;
 
-    static const char *params[4];
-    params[0] = ip;
-    params[1] = port;
-    params[2] = username;
-    params[3] = password;
+    /* Allocate copies of the strings so the network thread owns them.
+     * The UI thread's textarea buffers may be freed on screen switch. */
+    char **params = (char **)malloc(4 * sizeof(char *));
+    if (!params) return false;
+    params[0] = strdup(ip       ? ip       : "");
+    params[1] = strdup(port     ? port     : "");
+    params[2] = strdup(username ? username : "");
+    params[3] = strdup(password ? password : "");
 
     g_login_ok        = false;
     g_network_running = true;
@@ -671,6 +715,8 @@ bool network_start_connect(const char *ip, const char *port,
     if (pthread_create(&g_net_thread, NULL, network_thread_func,
                        (void *)params) != 0) {
         g_network_running = false;
+        free(params[0]); free(params[1]); free(params[2]); free(params[3]);
+        free(params);
         return false;
     }
     pthread_detach(g_net_thread);
@@ -725,11 +771,19 @@ bool network_cmd_put(const char *filename)
 {
     if (!g_network_running || g_sockfd < 0 || !filename) return false;
 
+    /* get local file size — also verifies the file exists */
+    struct stat st;
+    if (stat(filename, &st) != 0) {
+        /* file doesn't exist or can't be accessed */
+        return false;
+    }
+    int filesize = (int)st.st_size;
+
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
     g_state = ST_WAIT_PUT_RESP;
 
     int len;
-    unsigned char *pkt = build_cmd_with_str(FTP_CMD_PUT, filename, &len);
+    unsigned char *pkt = build_cmd_put(filename, filesize, &len);
     if (!pkt) return false;
     write(g_sockfd, pkt, (size_t)len);
     free(pkt);

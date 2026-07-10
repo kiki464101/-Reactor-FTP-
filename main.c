@@ -1,5 +1,7 @@
 #include "lvgl/lvgl.h"
 #include "lvgl/demos/lv_demos.h"
+#include "lvgl/src/drivers/sdl/lv_sdl_keyboard.h"
+#include "lvgl/src/drivers/sdl/lv_sdl_mousewheel.h"
 #include <unistd.h>
 #include <pthread.h>
 #include <time.h>
@@ -36,6 +38,12 @@ static void lv_linux_disp_init(void)
     const int height = atoi(getenv("LV_SDL_VIDEO_HEIGHT") ?: "600");
 
     lv_sdl_window_create(width, height);
+
+    /* SDL window only auto-creates a mouse — we must explicitly
+     * create keyboard and mousewheel input devices, otherwise
+     * textareas won't receive any keystrokes. */
+    lv_sdl_keyboard_create();
+    lv_sdl_mousewheel_create();
 }
 #else
 #error Unsupported configuration
