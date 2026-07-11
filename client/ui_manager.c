@@ -74,6 +74,9 @@ static prog_slot_t prog_slots[MAX_PROGRESS_BARS];
 static lv_obj_t   *batch_prog_panel = NULL;
 static int          batch_prog_count = 0;
 
+/* current local file browsing path */
+static char g_local_cur_path[256] = {0};
+
 /* ================================================================== */
 /*  Forward declarations of event handlers                            */
 /* ================================================================== */
@@ -950,8 +953,6 @@ void ui_update_file_list_cb(void *data)
 /* ================================================================== */
 /*  Local file helpers                                                 */
 /* ================================================================== */
-
-static char g_local_cur_path[256] = {0};  /* subpath relative to ./client/ */
 
 static char *scan_local_directory(const char *subpath)
 {
