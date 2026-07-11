@@ -37,13 +37,21 @@ unsigned char *read_packet(int fd, int *payload_len)
     unsigned char *payload = (unsigned char *)malloc((size_t)plen);
     if (!payload) return NULL;
 
-    int off = 0;
-    while (off < plen) {
-        if (read(fd, &ch, 1) <= 0) { free(payload); return NULL; }
-        if (ch == 0xC0) break;       /* trailer */
-        payload[off++] = ch;
+    /* Read exactly plen payload bytes — no 0xC0 scanning.
+     * This allows binary payloads containing 0xC0 bytes. */
+    {
+        int total = 0;
+        while (total < plen) {
+            int r = (int)read(fd, payload + total, (size_t)(plen - total));
+            if (r <= 0) { free(payload); return NULL; }
+            total += r;
+        }
     }
-    if (off != plen) { free(payload); return NULL; }
+    /* Verify trailing 0xC0 */
+    if (read(fd, &ch, 1) <= 0 || ch != 0xC0) {
+        free(payload);
+        return NULL;
+    }
 
     *payload_len = plen;
     return payload;
@@ -60,7 +68,7 @@ int send_packet(int fd, int cmd_no, int res_result,
      *   0xC0 + pkg_len(4) + cmd_no(4) + res_len(4) + res_result(1) + data + 0xC0
      */
     int res_len = 1 + data_len;       /* res_result byte + data */
-    int pkg_len = 14 + data_len;      /* header(1)+len(4)+cmd(4)+res_len(4)+res_result(1)+data+trailer(1) */
+    int pkg_len = 15 + data_len;      /* header(1)+len(4)+cmd(4)+res_len(4)+res_result(1)+data+trailer(1) = 15 */
 
     unsigned char *pkt = (unsigned char *)malloc((size_t)pkg_len);
     if (!pkt) return -1;

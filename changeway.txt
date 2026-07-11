@@ -1,0 +1,112 @@
+问题 1：点击 Download/Upload 不显示红色进度条
+原因分析：
+
+UI 层（ui_manager.c）中，on_download_btn_clicked 和 on_upload_btn_clicked 调用了 ui_show_progress_batch()。但在该函数中，给进度条设置红色指示器（LV_PART_INDICATOR）的代码存在逻辑覆盖或作用域问题，导致颜色未生效。
+网络层（network_task.c）在启动单文件下载/上传时，调用的是 ui_show_progress()，但部分状态判断可能导致弹窗未正确弹出或被立即隐藏。
+修改步骤：
+
+打开 ui_manager.c，定位到 ui_show_progress_batch(void) 函数。
+确保进度条创建后，明确设置指示器颜色为红色：
+找到 lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR); 这一行。
+确保没有后续代码将 LV_PART_INDICATOR 的背景色覆盖为其他颜色（如灰色或蓝色）。
+打开 network_task.c，定位到 start_download 和 start_upload 函数。
+在这两个函数中，找到类似 if (!g_batch_active) 的条件判断，确保无论是单文件还是批量文件，只要开始传输，都会调用 lv_async_call(cb_show_progress, spd); 来触发 UI 层的进度条显示。
+确保 cb_show_progress 回调中调用的 ui_show_progress() 正确创建了带有红色指示器的 lv_bar。
+问题 2：点击 Upload 后，文件未上传到服务器端
+原因分析：
+
+本地路径拼接错误：在 ui_manager.c 的 on_upload_btn_clicked 中，文件路径拼接逻辑存在缺陷。如果 g_local_cur_path 为空，它直接使用文件名，但在 network_task.c 的 network_cmd_put 中，硬编码了 ./client/%s。当 ui_manager.c 传入了带有 ./client/ 前缀的路径时，network_task.c 会拼接成 ./client/./client/xxx，导致找不到文件。
+批量上传逻辑冲突：network_task.c 中的 network_cmd_put_multi 仅将任务推入队列，但 network_cmd_put（实际执行单文件发送）没有正确被网络主线程的循环调度。
+修改步骤：
+
+打开 ui_manager.c，定位到 on_upload_btn_clicked 函数。
+修改文件名收集逻辑：不要在 UI 层加 ./client/ 前缀。直接把用户选中的文件名（不含路径）赋给 files[i]，或者只拼接相对子路径（如 subdir/file.txt），将完整路径的拼接工作全部交给网络层。
+打开 network_task.c，定位到 network_cmd_put 函数。
+修改文件存在性检查和路径拼接逻辑：
+无论传入的 filename 是否带子目录，都统一拼接为 ./client/%s。
+如果 filename 已经包含 ./client/，则不要重复拼接。
+打开 network_task.c，定位到 network_thread_func 的主循环。
+检查 if (g_state == ST_IDLE && g_tx_queue.count > 0) 逻辑块，确保调用了 batch_start_next()。
+在 batch_start_next() 中，如果是上传任务，确保调用的是 network_cmd_put(task.filename)，并且 network_cmd_put 能正确打开文件并进入 ST_WAIT_PUT_RESP 状态。
+问题 3：Server 的文件展示窗口没有像 Client 端一样的滚动进度条
+原因分析：
+
+Server 端目前没有提供文件列表展示窗口。Server 的主进程 main.c 只有一个 TUI（基于终端的文本用户界面），通过 printf 打印客户端连接状态，并没有图形化窗口，自然没有滚动条。
+如果指的是在客户端查看 Server 端文件时没有滚动条，则是 ui_manager.c 中 remote_cont 缺少滚动方向设置。
+修改步骤：
+
+澄清需求：如果是希望 Server 端在终端里有滚动效果，这不现实，TUI 是清屏重绘的。
+如果是希望客户端展示 Server 端文件列表时有滚动条：
+打开 ui_manager.c，定位到 ui_main_init(void)。
+找到创建 remote_cont 的地方。
+添加滚动条设置：lv_obj_set_scrollbar_mode(remote_cont, LV_SCROLLBAR_MODE_AUTO);（代码中已有此行，确认是否生效）。
+关键在于：给 main_file_list 设置固定高度，或者让其父容器 remote_cont 开启弹性布局（Flex）并允许换行，否则列表只会向下无限延伸而不产生滚动条。
+修改：在 main_file_list 创建后，不设置 LV_PCT(100) 的高度，而是让 remote_cont 的高度限制它，并为 main_file_list 添加 lv_obj_add_flag(main_file_list, LV_OBJ_FLAG_SCROLLABLE);。
+问题 4：显示不存在的文件，且无法正常展示 ./client/my_ftp/client 等目录下的文件
+原因分析：
+
+UI 层错误处理：当 network_task.c 收到服务器的 “not found” 或本地目录无法打开时，调用的是 ui_show_error()，它只是在状态栏显示红字，没有弹窗。
+本地扫描路径错误：ui_manager.c 的 scan_local_directory 硬编码了 ./client/%s，如果你实际文件在 ./client/my_ftp/client，而 UI 默认扫描的是 ./client/，自然看不到深层文件，且如果不支持点击进入子目录，就会一直显示空。
+修改步骤：
+
+添加弹窗提示：
+打开 ui_manager.c。
+确保已经实现了 ui_show_error_popup(const char *msg) 函数（代码中已有）。
+打开 network_task.c，找到所有调用 ui_show_error 或需要向用户强提示错误的地方（如收到 “Server: file not found” 时）。
+将 lv_async_call(cb_error, err); 改为 lv_async_call(cb_show_error_popup, err);，这样收到错误时是弹窗而不是状态栏红字。
+修复本地文件扫描与目录导航：
+打开 ui_manager.c，定位到 scan_local_directory。
+确认你的工程根目录结构。如果是在 ./client/ 下运行，修改 scan_local_directory 的基准路径为正确的相对路径。
+修改 on_local_file_item_clicked 函数：代码中已写了如果文件名以 / 结尾则进入目录的逻辑。确保你的目录名称在 scan_local_directory 中被正确加了 / 后缀。
+在 scan_local_directory 中，确保 S_ISDIR(st.st_mode) 判断成立时，执行 off += snprintf(buf + off, (size_t)(SIZE - off - 1), "%s/\n", d->d_name);。这样 UI 层点击时才能识别为目录并进入。
+处理 “Cannot open” 逻辑：
+在 scan_local_directory 中，当 opendir(full) 返回 NULL 时，目前是返回一个包含错误信息的字符串，导致 UI 把它当文件名显示。
+修改：让它返回 NULL，或者在 UI 层的 ui_update_local_file_list_cb 中，如果收到类似 (cannot open:...) 的字符串，调用 ui_show_error_popup("Cannot open directory") 并清空列表。
+总结指令发送给 Codex/Claude
+你可以将以下 Prompt 直接发给 AI 编程助手：
+
+请帮我修改这个 LVGL FTP 系统的代码，解决以下 4 个问题。请严格按照以下步骤修改对应的文件：
+
+问题 1：点击 Download/Upload 不显示红色进度条
+修改文件：ui_manager.c 和 network_task.c
+修改步骤：
+
+在 ui_manager.c 的 ui_show_progress_batch(void) 函数中，找到创建 prog_slots[0].bar 的地方。确保有以下两行代码设置红色指示器，且后续没有代码覆盖它：
+lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0x333355), 0);
+lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR);
+在 ui_manager.c 的 ui_show_progress(const char *filename, bool is_upload) 函数中，找到创建 prog_bar 的地方，同样确保添加了红色指示器：
+lv_obj_set_style_bg_color(prog_bar, lv_color_hex(0x333355), 0);
+lv_obj_set_style_bg_color(prog_bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR);
+在 network_task.c 的 start_download 和 start_upload 函数中，去掉 if (!g_batch_active) 的判断限制，让无论是单文件还是批量传输，只要进入这两个函数，必须调用 lv_async_call(cb_show_progress, spd); 以触发 UI 进度条弹窗。
+问题 2：选中文件点击 Upload 后，无法上传到服务器
+原因：UI 层和 Network 层重复拼接了 ./client/ 路径，且队列状态管理存在冲突。
+修改文件：ui_manager.c 和 network_task.c
+修改步骤：
+
+在 ui_manager.c 的 on_upload_btn_clicked 事件处理函数中，移除拼接 ./client/ 的逻辑。只收集纯文件名或相对子目录路径（如 subdir/file.txt），直接存入 files[i]。
+在 network_task.c 的 network_cmd_put(const char *filename) 函数中，统一处理路径：
+char path[520];
+snprintf(path, sizeof(path), "./client/%s", filename);
+然后使用这个 path 去做 stat 检查和 open 打开文件。
+在 network_task.c 的主循环 network_thread_func 中，找到处理 if (g_state == ST_IDLE && g_tx_queue.count > 0) 的逻辑块。确保在此处调用 batch_start_next() 时，如果队列为空或状态不是 IDLE，能够正确等待，不要在 network_cmd_put_multi 中直接调用 network_cmd_put。
+问题 3：客户端展示 Server 端文件列表时没有滚动条
+原因：remote_cont 容器没有正确限制高度并启用滚动，导致列表无限向下延伸。
+修改文件：ui_manager.c
+修改步骤：
+
+在 ui_manager.c 的 ui_main_init(void) 函数中，找到创建 remote_cont 的地方。
+确保它有固定的高度设置（已有 lv_obj_set_size(remote_cont, LV_PCT(96), 200);，保留此行）。
+在创建 main_file_list = lv_list_create(remote_cont); 之后，添加以下属性：
+lv_obj_set_size(main_file_list, LV_PCT(100), LV_PCT(100));
+lv_obj_add_flag(main_file_list, LV_OBJ_FLAG_SCROLLABLE);
+lv_obj_set_scrollbar_mode(main_file_list, LV_SCROLLBAR_MODE_AUTO);
+lv_obj_set_scroll_dir(main_file_list, LV_DIR_VER);
+问题 4：显示不存在的文件，无法扫描本地深层目录，缺少弹窗
+原因：目录打开失败时被当作普通文件名显示，目录项缺少 / 后缀导致无法点击进入子目录。
+修改文件：ui_manager.c 和 network_task.c
+修改步骤：
+
+在 ui_manager.c 的 scan_local_directory 函数中，当 opendir(full) 返回 NULL 时，不要把错误信息拼接到 buf 中返回，而是直接 return NULL;。
+在 ui_manager.c 的 ui_update_local_file_list_cb 回调中，如果接收到的 filelist 为 NULL，调用 ui_show_error_popup("Cannot open directory");，并清空列表，然后 return。
+在 scan_local_directory 中读取目录项时，如果是目录（S_ISDIR(st.st_mode) 为真），确保拼接时带有 / 后缀：off += snprintf(buf + off, (size_t)(SIZE - off - 1), "%s/\n", d->d_name);。
+在 network_task.c 中，将所有调用 lv_async_call(cb_error, err); 的地方，改为调用 lv_async_call(cb_show_error_popup, err);，这样遇到如 “Server: file not found” 等错误时会弹出提示框，点击 Close 关闭，不影响其他操作。

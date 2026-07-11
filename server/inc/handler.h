@@ -1,22 +1,41 @@
 #ifndef SERVER_HANDLER_H
 #define SERVER_HANDLER_H
 
+#include "thread_pool.h"
 #include "ipc_shm.h"
+#include <sys/epoll.h>
+#include <netinet/in.h>   /* struct sockaddr_in */
 
-/** Child-process internal state. */
-typedef enum {
-    ST_IDLE,        /**< waiting for a command packet */
-    ST_UPLOADING,   /**< receiving raw file data for PUT */
-} handler_state_t;
+/* Client session — persists across tasks on the same fd */
+typedef struct client_session {
+    int                fd;
+    struct sockaddr_in addr;
+    client_info_t     *shm;
+    int                epoll_fd;
+    char               ip[32];
+    int                port;
+    bool               logged_in;
+    /* upload state */
+    bool               uploading;
+    int                upload_fd;
+    int                upload_total;
+    int                upload_received;
+    char               upload_filename[256];
+} client_session_t;
 
-/**
- * Child-process entry point.
- * Runs the full per-client lifecycle: LOGIN → command loop → BYE.
- * @param confd  connected socket fd
- * @param ip     client IP string
- * @param port   client port
- * @param shm    pointer to the shared client table
- */
-void handle_client(int confd, const char *ip, int port, client_info_t *shm);
+/* Worker-thread command handlers (called from worker_func in handler.c) */
+
+void worker_handle_login(client_session_t *sess,
+                         const unsigned char *payload, int plen);
+
+void worker_handle_ls(client_session_t *sess);
+
+void worker_handle_get(client_session_t *sess,
+                       const unsigned char *payload, int plen);
+
+void worker_handle_put(client_session_t *sess,
+                       const unsigned char *payload, int plen);
+
+void worker_handle_bye(client_session_t *sess);
 
 #endif

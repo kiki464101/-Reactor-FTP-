@@ -58,6 +58,13 @@ static lv_obj_t *prog_info    = NULL;
 /* on-screen keyboard (shared) */
 static lv_obj_t *kb = NULL;
 
+static lv_obj_t *ui_get_window_parent(void)
+{
+    lv_obj_t *parent = lv_layer_top();
+    if (!parent) parent = lv_scr_act();
+    return parent;
+}
+
 /* ---- multi-transfer batch progress tracking ---- */
 #define MAX_PROGRESS_BARS 10
 
@@ -318,7 +325,9 @@ void ui_main_init(void)
     lv_obj_set_style_bg_color(remote_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(remote_cont, lv_color_hex(0x334466), 0);
     lv_obj_set_style_radius(remote_cont, 6, 0);
-    lv_obj_set_scrollbar_mode(remote_cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scrollbar_mode(remote_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(remote_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(remote_cont, LV_DIR_VER);
 
     main_file_list = lv_list_create(remote_cont);
     lv_obj_set_size(main_file_list, LV_PCT(100), LV_PCT(100));
@@ -340,7 +349,9 @@ void ui_main_init(void)
     lv_obj_set_style_bg_color(local_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(local_cont, lv_color_hex(0x334466), 0);
     lv_obj_set_style_radius(local_cont, 6, 0);
-    lv_obj_set_scrollbar_mode(local_cont, LV_SCROLLBAR_MODE_OFF);
+    lv_obj_set_scrollbar_mode(local_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(local_cont, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scroll_dir(local_cont, LV_DIR_VER);
 
     main_local_list = lv_list_create(local_cont);
     lv_obj_set_size(main_local_list, LV_PCT(100), LV_PCT(100));
@@ -412,7 +423,7 @@ void ui_switch_to_main(void)
 
 void ui_show_progress_batch(void)
 {
-    lv_obj_t *parent = lv_layer_top();
+    lv_obj_t *parent = ui_get_window_parent();
     if (!parent) return;
 
     /* don't duplicate */
@@ -525,7 +536,7 @@ void ui_on_transfer_done(const char *filename, bool success, bool is_upload)
 
 void ui_show_progress(const char *filename, bool is_upload)
 {
-    lv_obj_t *parent = lv_layer_top();
+    lv_obj_t *parent = ui_get_window_parent();
     if (!parent) return;
 
     /* clean up existing overlay */
@@ -718,10 +729,6 @@ static void on_refresh_btn_clicked(lv_event_t *e)
 static void on_download_btn_clicked(lv_event_t *e)
 {
     (void)e;
-    if (g_active_transfers > 0) {
-        ui_show_error("Transfer already in progress");
-        return;
-    }
     if (g_remote_sel_count == 0) {
         ui_show_error("No file selected");
         return;
@@ -740,25 +747,14 @@ static void on_download_btn_clicked(lv_event_t *e)
 static void on_upload_btn_clicked(lv_event_t *e)
 {
     (void)e;
-    if (g_active_transfers > 0) {
-        ui_show_error("Transfer already in progress");
-        return;
-    }
     if (g_local_sel_count == 0) {
         ui_show_error("No file selected");
         return;
     }
 
-    char full_names[MAX_SELECTED_FILES][256];
     const char *files[MAX_SELECTED_FILES];
-    for (int i = 0; i < g_local_sel_count; i++) {
-        if (g_local_cur_path[0])
-            snprintf(full_names[i], sizeof(full_names[i]),
-                     "%s/%s", g_local_cur_path, g_selected_local[i]);
-        else
-            strncpy(full_names[i], g_selected_local[i], sizeof(full_names[i]) - 1);
-        files[i] = full_names[i];
-    }
+    for (int i = 0; i < g_local_sel_count; i++)
+        files[i] = g_selected_local[i];
 
     ui_set_status("Uploading...");
     ui_show_progress_batch(); /* show popup synchronously on UI thread */
@@ -779,34 +775,51 @@ static void on_disconnect_btn_clicked(lv_event_t *e)
 /*  Error popup handler                                               */
 /* ================================================================== */
 
+static lv_obj_t *err_popup = NULL;
+static lv_obj_t *err_label = NULL;
+
 static void on_close_error_popup_btn_clicked(lv_event_t *e)
 {
     lv_obj_t *btn = lv_event_get_target(e);
     lv_obj_t *popup = lv_obj_get_parent(btn);
     lv_obj_del(popup);
+    err_popup = NULL;
+    err_label = NULL;
 }
 
 void ui_show_error_popup(const char *msg)
 {
-    lv_obj_t *parent = lv_layer_top();
+    lv_obj_t *parent = ui_get_window_parent();
     if (!parent) return;
 
-    lv_obj_t *popup = lv_obj_create(parent);
-    lv_obj_set_size(popup, 260, 110);
-    lv_obj_center(popup);
-    lv_obj_set_style_bg_color(popup, lv_color_hex(0x333355), 0);
-    lv_obj_set_style_border_color(popup, lv_color_hex(0xff4444), 0);
-    lv_obj_set_style_border_width(popup, 2, 0);
-    lv_obj_set_style_radius(popup, 8, 0);
+    /* If a popup already exists and is still valid, just update its text */
+    if (err_popup && lv_obj_is_valid(err_popup)) {
+        if (err_label) lv_label_set_text(err_label, msg);
+        return;
+    }
 
-    lv_obj_t *lbl = lv_label_create(popup);
-    lv_label_set_text(lbl, msg);
-    lv_obj_center(lbl);
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xffffff), 0);
+    err_popup = lv_obj_create(parent);
+    lv_obj_set_size(err_popup, 280, 150);
+    lv_obj_center(err_popup);
+    lv_obj_set_style_bg_color(err_popup, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_border_color(err_popup, lv_color_hex(0xff4444), 0);
+    lv_obj_set_style_border_width(err_popup, 2, 0);
+    lv_obj_set_style_radius(err_popup, 8, 0);
+    lv_obj_set_style_pad_all(err_popup, 15, 0);
 
-    lv_obj_t *close_btn = lv_button_create(popup);
+    /* use flex column so label and button stack without overlapping */
+    lv_obj_set_flex_flow(err_popup, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(err_popup, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+    err_label = lv_label_create(err_popup);
+    lv_label_set_text(err_label, msg);
+    lv_obj_set_style_text_color(err_label, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_align(err_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(err_label, LV_LABEL_LONG_WRAP);  /* allow text to wrap */
+    lv_obj_set_width(err_label, 240);                        /* limit width to force wrapping */
+
+    lv_obj_t *close_btn = lv_button_create(err_popup);
     lv_obj_set_size(close_btn, 80, 28);
-    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_MID, 0, -8);
     lv_obj_t *cbl = lv_label_create(close_btn);
     lv_label_set_text(cbl, "Close");
     lv_obj_center(cbl);
@@ -834,6 +847,8 @@ static void on_cancel_btn_clicked(lv_event_t *e)
 {
     (void)e;
     network_cancel_transfer();
+    ui_hide_progress();
+    ui_show_error("Transfer cancelled");
 }
 
 /* Show an on-screen keyboard when a textarea gains focus or is clicked. */
@@ -978,10 +993,15 @@ void ui_update_local_file_list_cb(void *data)
 
     lv_obj_clean(main_local_list);
 
-    /* handle NULL (directory open failed) */
+    /* handle NULL (directory open failed) — show "Unable file", then return to parent */
     if (!filelist) {
-        lv_list_add_text(main_local_list, "(cannot open)");
-        ui_show_error_popup("Cannot open directory");
+        lv_list_add_text(main_local_list, "(unable to open)");
+        ui_show_error_popup("Unable file");
+        /* return to parent directory */
+        char *slash = strrchr(g_local_cur_path, '/');
+        if (slash) *slash = '\0';
+        else g_local_cur_path[0] = '\0';
+        ui_refresh_local_files();
         return;
     }
 
@@ -1059,8 +1079,17 @@ static void on_local_file_item_clicked(lv_event_t *e)
     }
 
     /* regular file: toggle selection */
+
+    /* Build the full relative path for comparison/storage so that
+     * subdirectory context is preserved (e.g. "load/haha.txt"). */
+    char full_path[256];
+    if (g_local_cur_path[0])
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_local_cur_path, text);
+    else
+        strncpy(full_path, text, sizeof(full_path) - 1);
+
     for (int i = 0; i < g_local_sel_count; i++) {
-        if (strcmp(g_selected_local[i], text) == 0) {
+        if (strcmp(g_selected_local[i], full_path) == 0) {
             lv_obj_remove_style(btn, &style_selected_local, 0);
             for (int j = i; j < g_local_sel_count - 1; j++) {
                 strncpy(g_selected_local[j], g_selected_local[j + 1],
@@ -1075,7 +1104,7 @@ static void on_local_file_item_clicked(lv_event_t *e)
     if (g_local_sel_count >= MAX_SELECTED_FILES) return;
 
     lv_obj_add_style(btn, &style_selected_local, 0);
-    strncpy(g_selected_local[g_local_sel_count], text,
+    strncpy(g_selected_local[g_local_sel_count], full_path,
             sizeof(g_selected_local[g_local_sel_count]) - 1);
     g_local_sel_count++;
 

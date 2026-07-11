@@ -144,14 +144,14 @@ static unsigned char *read_packet(int fd, int *out_len)
     if (payload_len <= 0) return NULL;
     unsigned char *payload = (unsigned char *)malloc((size_t)payload_len);
     if (!payload) return NULL;
-    int offset = 0;
-    while (offset < payload_len) {
-        if (read(fd, &ch, 1) <= 0) { free(payload); return NULL; }
-        if (ch == 0xC0) break;       /* trailer reached */
-        payload[offset++] = ch;
+    /* Use read_n to read exactly payload_len bytes — avoids false
+     * termination when payload itself contains 0xC0 bytes. */
+    if (read_n(fd, payload, payload_len) != payload_len) {
+        free(payload);
+        return NULL;
     }
-    if (offset != payload_len) {
-        /* data contained a 0xC0 that wasn't really the trailer */
+    /* read and verify the 0xC0 trailer */
+    if (read(fd, &ch, 1) <= 0 || ch != 0xC0) {
         free(payload);
         return NULL;
     }
@@ -309,6 +309,13 @@ static void tx_queue_cancel_all(transfer_queue_t *q)
     pthread_mutex_unlock(&q->mutex);
 }
 
+static void tx_queue_reset(transfer_queue_t *q)
+{
+    pthread_mutex_lock(&q->mutex);
+    q->cancelled = false;
+    pthread_mutex_unlock(&q->mutex);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Async-callback wrappers sent to UI thread                         */
 /* ------------------------------------------------------------------ */
@@ -447,7 +454,7 @@ static bool batch_start_next(void)
         ok = network_cmd_get(task.filename);
 
     if (!ok) {
-        /* transfer failed to start — mark as failed and continue */
+        /* transfer failed to start -- mark as failed and continue */
         printf("[DEBUG] batch_start_next: failed to start '%s', skipping\n", task.filename);
         g_batch_done++;
         /* immediately try next in queue */
@@ -503,16 +510,8 @@ static void start_download(const char *filename, int filesize)
 
     g_state = ST_DOWNLOADING;
 
-    /* show progress dialog — must go through async call (UI thread safety) */
-    {
-        show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
-        if (spd) {
-            strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
-            spd->filename[sizeof(spd->filename) - 1] = '\0';
-            spd->is_upload = false;
-            lv_async_call(cb_show_progress, spd);
-        }
-    }
+    /* NOTE: progress popup is created synchronously by UI button handlers
+     * via ui_show_progress_batch(). Network layer only drives data transfer. */
 }
 
 static void update_dl_progress(void)
@@ -560,7 +559,7 @@ static void finish_download(bool success)
 
     if (g_batch_active) {
         g_batch_done++;
-        /* don't show "Downloaded" yet — batch_check_complete handles it */
+        /* don't show "Downloaded" yet -- batch_check_complete handles it */
     } else {
         str_data_t *msg = make_str_data(success
             ? "Downloaded"
@@ -603,16 +602,8 @@ static void start_upload(const char *filename)
 
     g_state = ST_UPLOADING;
 
-    /* show progress dialog — must go through async call (UI thread safety) */
-    {
-        show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
-        if (spd) {
-            strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
-            spd->filename[sizeof(spd->filename) - 1] = '\0';
-            spd->is_upload = true;
-            lv_async_call(cb_show_progress, spd);
-        }
-    }
+    /* NOTE: progress popup is created synchronously by UI button handlers
+     * via ui_show_progress_batch(). Network layer only drives data transfer. */
 }
 
 static void update_ul_progress(void)
@@ -661,7 +652,7 @@ static void finish_upload(bool success)
 
     if (g_batch_active) {
         g_batch_done++;
-        /* don't show "Uploaded" yet — batch_check_complete handles it */
+        /* don't show "Uploaded" yet -- batch_check_complete handles it */
     } else {
         str_data_t *msg = make_str_data(success
             ? "Uploaded"
@@ -677,18 +668,15 @@ static int handle_download_chunk(void)
 {
     unsigned char buf[CHUNK_SIZE];
     int remaining = g_dl_total - g_dl_received;
+    if (remaining <= 0) return 1;                     /* transfer complete */
+
     int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-    /* poll first so Cancel can interrupt the blocking read */
-    struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
-    int pr = poll(&pfd, 1, 100);
-    if (pr <= 0) {
-        if (g_transfer_cancelled) return -1;
-        return 0; /* timeout — loop will retry */
+    int r = (int)read(g_sockfd, buf, (size_t)to_read);
+    if (r <= 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;                                 /* retry later */
+        return -1;                                    /* connection error */
     }
-
-    int r = read_n(g_sockfd, buf, to_read);
-    if (r <= 0) return -1;
     int w = (int)write(g_dl_fd, buf, (size_t)r);
     if (w < 0) return -1;
     g_dl_received += w;
@@ -703,22 +691,17 @@ static int handle_upload_chunk(void)
 {
     unsigned char buf[CHUNK_SIZE];
     int remaining = g_ul_total - g_ul_sent;
+    if (remaining <= 0) return 1;                     /* transfer complete */
+
     int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-
-    /* read from local file (non-blocking — regular file always ready) */
     int r = (int)read(g_ul_fd, buf, (size_t)to_read);
-    if (r <= 0) return -1;
-
-    /* poll socket for writability so Cancel can interrupt */
-    struct pollfd pfd = { .fd = g_sockfd, .events = POLLOUT };
-    int pr = poll(&pfd, 1, 100);
-    if (pr <= 0) {
-        if (g_transfer_cancelled) return -1;
-        return 0; /* timeout — loop will retry */
-    }
-
+    if (r <= 0) return -1;                            /* local file error */
     int w = (int)write(g_sockfd, buf, (size_t)r);
-    if (w < 0) return -1;
+    if (w < 0) {
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+            return 0;                                 /* retry later */
+        return -1;                                    /* network error */
+    }
     g_ul_sent += w;
     update_ul_progress();
     return 0;
@@ -741,7 +724,7 @@ void *network_thread_func(void *arg)
         if (params[1]) strncpy(port,     params[1], sizeof(port) - 1);
         if (params[2]) strncpy(username, params[2], sizeof(username) - 1);
         if (params[3]) strncpy(password, params[3], sizeof(password) - 1);
-        /* free now 鈥?we've copied everything to local buffers */
+        /* free now -- we've copied everything to local buffers */
         free(params[0]); free(params[1]); free(params[2]); free(params[3]);
         free(params);
     }
@@ -831,6 +814,9 @@ void *network_thread_func(void *arg)
     /* ---- main RX loop ---- */
     g_state = ST_IDLE;
     while (g_network_running) {
+        /* ============================================================ */
+        /*  Priority 1: ST_DOWNLOADING - receive raw file stream        */
+        /* ============================================================ */
         if (g_state == ST_DOWNLOADING) {
             if (g_transfer_cancelled) {
                 finish_download(false);
@@ -841,12 +827,14 @@ void *network_thread_func(void *arg)
                 finish_download(true);
                 continue;
             }
-            if (handle_download_chunk() < 0) {
-                finish_download(false);
-            }
-            continue;
+            int rc = handle_download_chunk();
+            if (rc < 0)  finish_download(false);
+            continue;       /* tight loop: keep reading until done/error */
         }
 
+        /* ============================================================ */
+        /*  Priority 2: ST_UPLOADING - send raw file stream             */
+        /* ============================================================ */
         if (g_state == ST_UPLOADING) {
             if (g_transfer_cancelled) {
                 finish_upload(false);
@@ -857,86 +845,98 @@ void *network_thread_func(void *arg)
                 finish_upload(true);
                 continue;
             }
-            if (handle_upload_chunk() < 0) {
-                finish_upload(false);
-            }
-            continue;
+            int rc = handle_upload_chunk();
+            if (rc < 0)  finish_upload(false);
+            continue;       /* tight loop: keep writing until done/error */
         }
 
-        /* ---- IDLE / waiting for a response packet ---- */
-        /* Only process queue when completely idle (not waiting for response) */
-        if (g_state == ST_IDLE && g_tx_queue.count > 0 && !g_tx_queue.cancelled) {
-            printf("[DEBUG] main loop: starting next queued transfer (queue=%d)\n", g_tx_queue.count);
-            batch_start_next();
-            continue;
-        }
-
-        /* Check batch completion */
+        /* ============================================================ */
+        /*  Priority 3: ST_IDLE - start queued transfers               */
+        /* ============================================================ */
         if (g_state == ST_IDLE) {
+            if (g_transfer_cancelled) { g_transfer_cancelled = false; }
+            if (g_tx_queue.count > 0 && !g_tx_queue.cancelled) {
+                printf("[DEBUG] main loop: starting next queued transfer (queue=%d)\n",
+                       g_tx_queue.count);
+                batch_start_next();
+                continue;
+            }
             batch_check_complete();
         }
 
-        /* poll with timeout so we can check g_network_running */
-        struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
-        int polltime = (g_state == ST_IDLE && g_tx_queue.count > 0) ? 0 : 500;
-        int pr = poll(&pfd, 1, polltime);
-        if (pr < 0) break;
-        if (pr == 0) continue;           /* timeout, re-check flag */
+        /* ============================================================ */
+        /*  Priority 4: ST_WAIT / ST_IDLE - poll for server response   */
+        /* ============================================================ */
+        {
+            struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
+            int polltime = (g_state == ST_IDLE && g_tx_queue.count > 0) ? 0 : 500;
+            int pr = poll(&pfd, 1, polltime);
+            if (pr < 0) break;
+            if (pr == 0) continue;
 
-        unsigned char *payload = read_packet(g_sockfd, &rlen);
-        if (!payload) break;             /* connection lost */
+            unsigned char *payload = read_packet(g_sockfd, &rlen);
+            if (!payload) break;
 
-        resp_t rsp2;
-        if (!parse_response(payload, rlen, &rsp2)) {
-            free(payload);
-            continue;
-        }
-
-        switch (rsp2.cmd_no) {
-        case FTP_CMD_LS:
-            if (rsp2.res_result == 1) {
-                int dlen = rsp2.res_len - 1;
-                char *filelist = (char *)malloc((size_t)(dlen + 1));
-                if (filelist) {
-                    memcpy(filelist, rsp2.res_data, (size_t)dlen);
-                    filelist[dlen] = '\0';
-                    lv_async_call(ui_update_file_list_cb, filelist);
-                }
+            resp_t rsp2;
+            if (!parse_response(payload, rlen, &rsp2)) {
+                free(payload);
+                continue;
             }
-            break;
 
-        case FTP_CMD_GET:
-            if (rsp2.res_result == 1) {
-                int filesize = get_le32(rsp2.res_data);
-                start_download(g_dl_filename, filesize);
-            } else {
-                str_data_t *err = make_str_data("Server: file not found");
-                if (err) lv_async_call(cb_show_error_popup, err);
-            }
-            break;
-
-        case FTP_CMD_PUT:
-            if (rsp2.res_result == 1) {
-                if (g_ul_filename[0]) {
-                    start_upload(g_ul_filename);
+            /* Dispatch based on current state expectation */
+            if (g_state == ST_WAIT_GET_RESP) {
+                if (rsp2.cmd_no == FTP_CMD_GET && rsp2.res_result == 1) {
+                    int filesize = get_le32(rsp2.res_data);
+                    start_download(g_dl_filename, filesize);
                 } else {
-                    str_data_t *err = make_str_data("Upload target missing");
+                    str_data_t *err = make_str_data("Server: file not found");
                     if (err) lv_async_call(cb_show_error_popup, err);
+                    g_state = ST_IDLE;
+                    if (g_batch_active) { g_batch_done++; }
                 }
-            } else {
-                str_data_t *err = make_str_data("Server rejected upload");
-                if (err) lv_async_call(cb_show_error_popup, err);
+                free(payload);
+                continue;
             }
-            break;
 
-        case FTP_CMD_BYE:
-            /* server acknowledges 锟?we'll disconnect on our side */
-            break;
+            if (g_state == ST_WAIT_PUT_RESP) {
+                if (rsp2.cmd_no == FTP_CMD_PUT && rsp2.res_result == 1) {
+                    if (g_ul_filename[0])
+                        start_upload(g_ul_filename);
+                    else {
+                        str_data_t *err = make_str_data("Upload target missing");
+                        if (err) lv_async_call(cb_show_error_popup, err);
+                        g_state = ST_IDLE;
+                    }
+                } else {
+                    str_data_t *err = make_str_data("Server rejected upload");
+                    if (err) lv_async_call(cb_show_error_popup, err);
+                    g_state = ST_IDLE;
+                    if (g_batch_active) { g_batch_done++; }
+                }
+                free(payload);
+                continue;
+            }
 
-        default:
-            break;
+            /* ---- ST_IDLE: async notifications (LS, unsolicited) ---- */
+            switch (rsp2.cmd_no) {
+            case FTP_CMD_LS:
+                if (rsp2.res_result == 1) {
+                    int dlen = rsp2.res_len - 1;
+                    char *filelist = (char *)malloc((size_t)(dlen + 1));
+                    if (filelist) {
+                        memcpy(filelist, rsp2.res_data, (size_t)dlen);
+                        filelist[dlen] = '\0';
+                        lv_async_call(ui_update_file_list_cb, filelist);
+                    }
+                }
+                break;
+            case FTP_CMD_BYE:
+                break;
+            default:
+                break;
+            }
+            free(payload);
         }
-        free(payload);
     }
 
     /* ---- cleanup ---- */
@@ -1071,6 +1071,9 @@ bool network_cmd_get_multi(const char **filenames, int count)
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
 
+    /* reset cancelled flag so queue is usable after a prior cancel */
+    tx_queue_reset(&g_tx_queue);
+
     /* push all to queue, count actual enqueued */
     int actual = 0;
     for (int i = 0; i < count; i++) {
@@ -1096,6 +1099,9 @@ bool network_cmd_put_multi(const char **filenames, int count)
 {
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
+
+    /* reset cancelled flag so queue is usable after a prior cancel */
+    tx_queue_reset(&g_tx_queue);
 
     struct stat st;
     int valid_count = 0;

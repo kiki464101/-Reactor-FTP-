@@ -5,13 +5,19 @@
 #define MY_FTP_BOOT "./copy"
 
 typedef enum {
-    FTP_CMD_LS    = 1024,
-    FTP_CMD_GET   = 1025,
-    FTP_CMD_PUT   = 1026,
-    FTP_CMD_BYE   = 1027,
-    FTP_CMD_LOGIN = 1028,
+    FTP_CMD_LS       = 1024,
+    FTP_CMD_GET      = 1025,
+    FTP_CMD_PUT      = 1026,
+    FTP_CMD_BYE      = 1027,
+    FTP_CMD_LOGIN    = 1028,
+    FTP_CMD_CANCEL   = 1029,
+    FTP_CMD_GET_DATA = 1030,  /* data connection handshake: download */
+    FTP_CMD_PUT_DATA = 1031,  /* data connection handshake: upload */
+    FTP_CMD_DONE     = 1032,  /* control connection: transfer complete notification */
 } cmd_no_t;
 
+/* Reads exactly the frame header (8 bytes) then pkg_len payload bytes,
+ * not scanning for 0xC0 marker.  Caller must free the returned buffer. */
 unsigned char *read_packet(int fd, int *payload_len);
 int send_packet(int fd, int cmd_no, int res_result,
                 const unsigned char *data, int data_len);
