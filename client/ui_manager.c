@@ -768,6 +768,7 @@ static void on_download_btn_clicked(lv_event_t *e)
         files[i] = g_selected_remote[i];
 
     ui_set_status("Downloading...");
+    ui_show_progress_batch(); /* show popup synchronously on UI thread */
     if (!network_cmd_get_multi(files, g_remote_sel_count))
         ui_show_error("Failed to start download");
 }
@@ -789,6 +790,7 @@ static void on_upload_btn_clicked(lv_event_t *e)
         files[i] = g_selected_local[i];
 
     ui_set_status("Uploading...");
+    ui_show_progress_batch(); /* show popup synchronously on UI thread */
     if (!network_cmd_put_multi(files, g_local_sel_count))
         ui_show_error("No valid files to upload");
 }
@@ -948,7 +950,7 @@ static char *scan_local_directory(void)
     int off = 0;
     buf[0] = '\0';
 
-    DIR *dir = opendir("./client");
+DIR *dir = opendir(".");
     if (!dir) {
         strncpy(buf, "(cannot open client dir)", SIZE - 1);
         return buf;

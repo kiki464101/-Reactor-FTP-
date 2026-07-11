@@ -1,4 +1,4 @@
-#define _GNU_SOURCE
+﻿#define _GNU_SOURCE
 /**
  * @file network_task.c
  * @brief Network thread for LVGL FTP client
@@ -389,30 +389,16 @@ static void cb_ul_done(void *data)
     free(d);
 }
 
-/* ---- Transfer-task data types and async callbacks ---- */
-
-typedef struct {
-    char filename[256];
-    int  percent;
-    int  current_bytes;
-    int  total_bytes;
-    bool is_upload;
-} tx_progress_data_t;
+/* ---- Multi-file batch state ---- */
+static int           g_batch_count      = 0;   /* total files in batch */
+static int           g_batch_done       = 0;   /* files completed */
+static bool          g_batch_active     = false;
 
 typedef struct {
     char filename[256];
     bool success;
     bool is_upload;
 } tx_done_data_t;
-
-static void cb_tx_progress(void *data)
-{
-    tx_progress_data_t *d = (tx_progress_data_t *)data;
-    ui_update_transfer_progress(d->filename, d->percent,
-                                 d->current_bytes, d->total_bytes,
-                                 d->is_upload);
-    free(d);
-}
 
 static void cb_tx_done(void *data)
 {
@@ -421,360 +407,36 @@ static void cb_tx_done(void *data)
     free(d);
 }
 
-static void cb_all_done(void *data)
-{
-    (void)data;
-    __sync_synchronize();
-    int active = g_active_transfers;
-    if (active <= 0 && g_tx_queue.count == 0) {
-        if (g_tx_queue.cancelled)
-            ui_set_status("Transfer cancelled");
-        else
-            ui_set_status("Transfer complete");
-        ui_hide_progress();
-        ui_restore_status_after_delay();
-    }
-}
-
-static void cb_show_progress_batch(void *data)
-{
-    (void)data;
-    ui_show_progress_batch();
-}
-
 static void cb_show_error_popup(void *data)
 {
     str_data_t *d = (str_data_t *)data;
-    if (d) {
-        ui_show_error_popup(d->text);
-        free(d);
-    }
+    if (d) { ui_show_error_popup(d->text); free(d); }
 }
 
-static void report_tx_progress(const char *filename, int pct,
-                                int cur, int total, bool is_upload)
+static void batch_on_file_done(bool success)
 {
-    tx_progress_data_t *d = (tx_progress_data_t *)malloc(sizeof(*d));
-    if (!d) return;
-    strncpy(d->filename, filename, sizeof(d->filename) - 1);
-    d->filename[sizeof(d->filename) - 1] = '\0';
-    d->percent       = pct;
-    d->current_bytes = cur;
-    d->total_bytes   = total;
-    d->is_upload     = is_upload;
-    lv_async_call(cb_tx_progress, d);
-}
-
-static void report_tx_complete(const char *filename, bool success,
-                                bool is_upload)
-{
-    tx_done_data_t *d = (tx_done_data_t *)malloc(sizeof(*d));
-    if (!d) return;
-    strncpy(d->filename, filename, sizeof(d->filename) - 1);
-    d->filename[sizeof(d->filename) - 1] = '\0';
-    d->success   = success;
-    d->is_upload = is_upload;
-    lv_async_call(cb_tx_done, d);
-}
-
-static void report_all_done(void)
-{
-    lv_async_call(cb_all_done, NULL);
-}
-
-/* ================================================================== */
-/*  Transfer worker helpers                                           */
-/* ================================================================== */
-
-static bool worker_login(int sock)
-{
-    int ulen = (int)strlen(g_login_user);
-    int plen = (int)strlen(g_login_pass);
-    int arg_total = 4 + ulen + 4 + plen;
-
-    unsigned char *login_arg = (unsigned char *)malloc((size_t)arg_total);
-    if (!login_arg) return false;
-
-    put_le32(login_arg, ulen);
-    memcpy(login_arg + 4, g_login_user, (size_t)ulen);
-    put_le32(login_arg + 4 + ulen, plen);
-    memcpy(login_arg + 4 + ulen + 4, g_login_pass, (size_t)plen);
-
-    int pkt_len;
-    unsigned char *pkt = build_cmd(FTP_CMD_LOGIN, login_arg, arg_total, &pkt_len);
-    free(login_arg);
-    if (!pkt) return false;
-
-    write(sock, pkt, (size_t)pkt_len);
-    free(pkt);
-
-    int rlen;
-    unsigned char *rsp = read_packet(sock, &rlen);
-    if (!rsp) return false;
-
-    resp_t resp;
-    bool ok = parse_response(rsp, rlen, &resp)
-              && resp.cmd_no == FTP_CMD_LOGIN
-              && resp.res_result == 1;
-    free(rsp);
-    return ok;
-}
-
-static void do_download_task(const transfer_task_t *task)
-{
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        report_tx_complete(task->filename, false, false);
-        return;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons((uint16_t)atoi(g_login_port));
-    inet_pton(AF_INET, g_login_ip, &addr.sin_addr);
-
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        report_tx_complete(task->filename, false, false);
-        return;
-    }
-
-    if (!worker_login(sock)) {
-        close(sock);
-        report_tx_complete(task->filename, false, false);
-        return;
-    }
-
-    int len;
-    unsigned char *pkt = build_cmd_with_str(FTP_CMD_GET, task->filename, &len);
-    if (!pkt) { close(sock); report_tx_complete(task->filename, false, false); return; }
-    write(sock, pkt, (size_t)len);
-    free(pkt);
-
-    int rlen;
-    unsigned char *rsp = read_packet(sock, &rlen);
-    if (!rsp) { close(sock); report_tx_complete(task->filename, false, false); return; }
-
-    resp_t resp;
-    bool parsed = parse_response(rsp, rlen, &resp);
-    if (!parsed || resp.cmd_no != FTP_CMD_GET || resp.res_result != 1) {
-        free(rsp);
-        close(sock);
-        report_tx_complete(task->filename, false, false);
-        return;
-    }
-
-    int filesize = get_le32(resp.res_data);
-    free(rsp);
-
-    mkdir("./client/load", 0755);
-    char path[520];
-    snprintf(path, sizeof(path), "./client/load/%s", task->filename);
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        close(sock);
-        report_tx_complete(task->filename, false, false);
-        return;
-    }
-
-    unsigned char buf[CHUNK_SIZE];
-    int received  = 0;
-    int last_pct  = -1;
-
-    while (received < filesize) {
-        if (g_tx_queue.cancelled) break;
-
-        int remaining = filesize - received;
-        int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-        int r = (int)read(sock, buf, (size_t)to_read);
-        if (r <= 0) break;
-        ssize_t w = write(fd, buf, (size_t)r);
-        if (w < 0) break;
-        received += (int)w;
-
-        int pct = (filesize > 0) ? (received * 100 / filesize) : 0;
-        if (pct - last_pct >= 2 || pct >= 100) {
-            last_pct = pct;
-            report_tx_progress(task->filename, pct, received, filesize, false);
-        }
-    }
-
-    close(fd);
-    close(sock);
-
-    if (g_tx_queue.cancelled) {
-        unlink(path);
-        report_tx_complete(task->filename, false, false);
-    } else if (received >= filesize) {
-        report_tx_complete(task->filename, true, false);
+    if (!g_batch_active) return;
+    g_batch_done++;
+    if (g_batch_done >= g_batch_count) {
+        /* all files done */
+        g_batch_active = false;
+        str_data_t *msg = make_str_data("Transfer complete");
+        if (msg) lv_async_call(cb_dl_done, msg);
     } else {
-        report_tx_complete(task->filename, false, false);
-    }
-}
-
-static void do_upload_task(const transfer_task_t *task)
-{
-    char local_path[520];
-    snprintf(local_path, sizeof(local_path), "./client/%s", task->filename);
-
-    struct stat st;
-    if (stat(local_path, &st) != 0) {
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-    int filesize = (int)st.st_size;
-
-    int local_fd = open(local_path, O_RDONLY);
-    if (local_fd < 0) {
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-
-    int sock = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock < 0) {
-        close(local_fd);
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port   = htons((uint16_t)atoi(g_login_port));
-    inet_pton(AF_INET, g_login_ip, &addr.sin_addr);
-
-    if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(sock);
-        close(local_fd);
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-
-    if (!worker_login(sock)) {
-        close(sock);
-        close(local_fd);
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-
-    int slen = (int)strlen(task->filename);
-    int arg_len = 4 + slen + 4;
-    unsigned char *arg = (unsigned char *)malloc((size_t)arg_len);
-    if (!arg) { close(sock); close(local_fd); report_tx_complete(task->filename, false, true); return; }
-    put_le32(arg, slen);
-    memcpy(arg + 4, task->filename, (size_t)slen);
-    put_le32(arg + 4 + slen, filesize);
-
-    int pkt_len;
-    unsigned char *pkt = build_cmd(FTP_CMD_PUT, arg, arg_len, &pkt_len);
-    free(arg);
-    if (!pkt) { close(sock); close(local_fd); report_tx_complete(task->filename, false, true); return; }
-    write(sock, pkt, (size_t)pkt_len);
-    free(pkt);
-
-    int rlen;
-    unsigned char *rsp = read_packet(sock, &rlen);
-    if (!rsp) { close(sock); close(local_fd); report_tx_complete(task->filename, false, true); return; }
-
-    resp_t resp;
-    bool parsed = parse_response(rsp, rlen, &resp);
-    free(rsp);
-    if (!parsed || resp.cmd_no != FTP_CMD_PUT || resp.res_result != 1) {
-        close(sock);
-        close(local_fd);
-        report_tx_complete(task->filename, false, true);
-        return;
-    }
-
-    unsigned char buf[CHUNK_SIZE];
-    int sent     = 0;
-    int last_pct = -1;
-
-    while (sent < filesize) {
-        if (g_tx_queue.cancelled) break;
-
-        int remaining = filesize - sent;
-        int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
-        int r = (int)read(local_fd, buf, (size_t)to_read);
-        if (r <= 0) break;
-        ssize_t w = write(sock, buf, (size_t)r);
-        if (w < 0) break;
-        sent += (int)w;
-
-        int pct = (filesize > 0) ? (sent * 100 / filesize) : 0;
-        if (pct - last_pct >= 2 || pct >= 100) {
-            last_pct = pct;
-            report_tx_progress(task->filename, pct, sent, filesize, true);
-        }
-    }
-
-    close(local_fd);
-    close(sock);
-
-    if (g_tx_queue.cancelled) {
-        report_tx_complete(task->filename, false, true);
-    } else if (sent >= filesize) {
-        report_tx_complete(task->filename, true, true);
-    } else {
-        report_tx_complete(task->filename, false, true);
-    }
-}
-
-static void *transfer_worker_func(void *arg)
-{
-    transfer_worker_t *worker = (transfer_worker_t *)arg;
-    transfer_task_t task;
-
-    while (worker->running) {
-        if (!tx_queue_pop(&g_tx_queue, &task))
-            break;
-
-        __sync_fetch_and_add(&g_active_transfers, 1);
-
-        if (task.is_upload)
-            do_upload_task(&task);
-        else
-            do_download_task(&task);
-
-        __sync_fetch_and_sub(&g_active_transfers, 1);
-    }
-
-    if (g_active_transfers <= 0 && g_tx_queue.count == 0)
-        report_all_done();
-
-    return NULL;
-}
-
-void transfer_pool_init(void)
-{
-    tx_queue_init(&g_tx_queue);
-
-    for (int i = 0; i < TRANSFER_POOL_SIZE; i++) {
-        g_tx_workers[i].id      = i;
-        g_tx_workers[i].running = true;
-        if (pthread_create(&g_tx_workers[i].thread, NULL,
-                           transfer_worker_func, &g_tx_workers[i]) != 0) {
-            g_tx_workers[i].running = false;
-        } else {
-            pthread_detach(g_tx_workers[i].thread);
+        /* start next file from queue */
+        transfer_task_t task;
+        if (tx_queue_pop(&g_tx_queue, &task)) {
+            if (task.is_upload)
+                network_cmd_put(task.filename);
+            else
+                network_cmd_get(task.filename);
         }
     }
 }
 
-void transfer_pool_stop(void)
-{
-    tx_queue_cancel_all(&g_tx_queue);
-
-    for (int i = 0; i < TRANSFER_POOL_SIZE; i++) {
-        g_tx_workers[i].running = false;
-    }
-    pthread_cond_broadcast(&g_tx_queue.cond);
-    usleep(100000);
-
-    tx_queue_destroy(&g_tx_queue);
-    g_active_transfers = 0;
-}
+/* ------------------------------------------------------------------ */
+/*  Download state management (called from network thread)            */
+/* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
 /*  Download state management (called from network thread)            */
@@ -786,10 +448,10 @@ static void start_download(const char *filename, int filesize)
     g_dl_received = 0;
     g_last_progress = -1;
 
-    /* create / truncate local file */
-    mkdir("./load", 0755);
+    /* create / truncate local file in client/load/ */
+    mkdir("./client/load", 0755);
     char dl_path[520];
-    snprintf(dl_path, sizeof(dl_path), "./load/%s", filename);
+    snprintf(dl_path, sizeof(dl_path), "./client/load/%s", filename);
     g_dl_fd = open(dl_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (g_dl_fd < 0) {
         str_data_t *err = make_str_data("Failed to create local file");
@@ -808,7 +470,7 @@ static void start_download(const char *filename, int filesize)
 
     g_state = ST_DOWNLOADING;
 
-    /* show progress dialog — must go through async call (UI thread safety) */
+    /* show progress dialog 鈥?must go through async call (UI thread safety) */
     show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
     if (spd) {
         strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
@@ -845,10 +507,26 @@ static void finish_download(bool success)
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
 
-    str_data_t *msg = make_str_data(success
-        ? "Downloaded"
-        : "Download failed");
-    if (msg) lv_async_call(cb_dl_done, msg);
+    /* report progress to batch panel */
+    {
+        tx_done_data_t *d = (tx_done_data_t *)malloc(sizeof(*d));
+        if (d) {
+            strncpy(d->filename, g_dl_filename, sizeof(d->filename) - 1);
+            d->filename[sizeof(d->filename) - 1] = '\0';
+            d->success   = success;
+            d->is_upload = false;
+            lv_async_call(cb_tx_done, d);
+        }
+    }
+
+    if (g_batch_active) {
+        batch_on_file_done(success);
+    } else {
+        str_data_t *msg = make_str_data(success
+            ? "Downloaded"
+            : "Download failed");
+        if (msg) lv_async_call(cb_dl_done, msg);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -858,9 +536,8 @@ static void start_upload(const char *filename)
 {
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
 
-    mkdir("./copy", 0755);
     char ul_path[520];
-    snprintf(ul_path, sizeof(ul_path), "./copy/%s", filename);
+    snprintf(ul_path, sizeof(ul_path), "./client/%s", filename);
     g_ul_fd = open(ul_path, O_RDONLY);
     if (g_ul_fd < 0) {
         str_data_t *err = make_str_data("Local file not found");
@@ -885,7 +562,7 @@ static void start_upload(const char *filename)
 
     g_state = ST_UPLOADING;
 
-    /* show progress dialog — must go through async call (UI thread safety) */
+    /* show progress dialog 鈥?must go through async call (UI thread safety) */
     show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
     if (spd) {
         strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
@@ -979,7 +656,7 @@ void *network_thread_func(void *arg)
         if (params[1]) strncpy(port,     params[1], sizeof(port) - 1);
         if (params[2]) strncpy(username, params[2], sizeof(username) - 1);
         if (params[3]) strncpy(password, params[3], sizeof(password) - 1);
-        /* free now — we've copied everything to local buffers */
+        /* free now 鈥?we've copied everything to local buffers */
         free(params[0]); free(params[1]); free(params[2]); free(params[3]);
         free(params);
     }
@@ -1063,8 +740,8 @@ void *network_thread_func(void *arg)
     }
     free(rsp);
 
-    /* initialize transfer pool after successful login */
-    transfer_pool_init();
+    /* initialize transfer queue */
+    tx_queue_init(&g_tx_queue);
 
     /* ---- main RX loop ---- */
     g_state = ST_IDLE;
@@ -1092,6 +769,18 @@ void *network_thread_func(void *arg)
         }
 
         /* ---- IDLE / waiting for a response packet ---- */
+        /* check transfer queue for pending multi-file tasks */
+        if (g_tx_queue.count > 0 && !g_tx_queue.cancelled) {
+            transfer_task_t task;
+            if (tx_queue_pop(&g_tx_queue, &task)) {
+                if (task.is_upload)
+                    network_cmd_put(task.filename);
+                else
+                    network_cmd_get(task.filename);
+                continue;
+            }
+        }
+
         /* poll with timeout so we can check g_network_running */
         struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
         int pr = poll(&pfd, 1, 500);
@@ -1140,7 +829,7 @@ void *network_thread_func(void *arg)
             break;
 
         case FTP_CMD_BYE:
-            /* server acknowledges �?we'll disconnect on our side */
+            /* server acknowledges 锟?we'll disconnect on our side */
             break;
 
         default:
@@ -1150,7 +839,8 @@ void *network_thread_func(void *arg)
     }
 
     /* ---- cleanup ---- */
-    transfer_pool_stop();
+    tx_queue_cancel_all(&g_tx_queue);
+    tx_queue_destroy(&g_tx_queue);
     if (g_dl_fd >= 0) { close(g_dl_fd); g_dl_fd = -1; }
     if (g_ul_fd >= 0) { close(g_ul_fd); g_ul_fd = -1; }
     if (g_sockfd >= 0) { close(g_sockfd); g_sockfd = -1; }
@@ -1199,7 +889,8 @@ bool network_start_connect(const char *ip, const char *port,
 
 void network_disconnect(void)
 {
-    transfer_pool_stop();
+    tx_queue_cancel_all(&g_tx_queue);
+    g_batch_active = false;
 
     if (!g_network_running || g_sockfd < 0) return;
 
@@ -1228,36 +919,73 @@ bool network_cmd_ls(void)
     return true;
 }
 
+/* ---- Single-file: send directly on main socket (core transfer functions) ---- */
+
 bool network_cmd_get(const char *filename)
 {
-    return network_cmd_get_multi(&filename, 1);
+    if (!g_network_running || g_sockfd < 0 || !filename) return false;
+
+    strncpy(g_dl_filename, filename, sizeof(g_dl_filename) - 1);
+    g_state = ST_WAIT_GET_RESP;
+
+    int len;
+    unsigned char *pkt = build_cmd_with_str(FTP_CMD_GET, filename, &len);
+    if (!pkt) return false;
+    write(g_sockfd, pkt, (size_t)len);
+    free(pkt);
+    return true;
 }
+
+bool network_cmd_put(const char *filename)
+{
+    if (!g_network_running || g_sockfd < 0 || !filename) return false;
+
+    /* check local file exists under ./client/ */
+    struct stat st;
+    char path[520];
+    snprintf(path, sizeof(path), "./client/%s", filename);
+    if (stat(path, &st) != 0) {
+        return false;
+    }
+    int filesize = (int)st.st_size;
+
+    strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
+    g_state = ST_WAIT_PUT_RESP;
+
+    int len;
+    unsigned char *pkt = build_cmd_put(filename, filesize, &len);
+    if (!pkt) return false;
+    write(g_sockfd, pkt, (size_t)len);
+    free(pkt);
+    return true;
+}
+
+/* ---- Multi-file: push all to queue, start the first one ---- */
 
 bool network_cmd_get_multi(const char **filenames, int count)
 {
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
 
-    lv_async_call(cb_show_progress_batch, NULL);
-
-    int enqueued = 0;
+    /* push all to queue */
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
-
         transfer_task_t task;
         memset(&task, 0, sizeof(task));
         strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
         task.is_upload = false;
-
-        if (tx_queue_push(&g_tx_queue, &task))
-            enqueued++;
+        tx_queue_push(&g_tx_queue, &task);
     }
-    return enqueued > 0;
-}
 
-bool network_cmd_put(const char *filename)
-{
-    return network_cmd_put_multi(&filename, 1);
+    /* start first transfer */
+    transfer_task_t first;
+    if (tx_queue_pop(&g_tx_queue, &first)) {
+        g_batch_count  = count;
+        g_batch_done   = 0;
+        g_batch_active = true;
+        network_cmd_get(first.filename);
+    }
+    return true;
 }
 
 bool network_cmd_put_multi(const char **filenames, int count)
@@ -1267,39 +995,42 @@ bool network_cmd_put_multi(const char **filenames, int count)
 
     struct stat st;
     int valid_count = 0;
-    const char *valid_files[MAX_SELECTED_FILES];
 
+    /* validate and push */
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
         char fpath[520];
         snprintf(fpath, sizeof(fpath), "./client/%s", filenames[i]);
         if (stat(fpath, &st) != 0) {
+            /* file doesn't exist - show error popup on UI thread */
             str_data_t *err = make_str_data("file unexist");
             if (err) lv_async_call(cb_show_error_popup, err);
             continue;
         }
-        valid_files[valid_count++] = filenames[i];
+        transfer_task_t task;
+        memset(&task, 0, sizeof(task));
+        strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
+        task.is_upload = true;
+        tx_queue_push(&g_tx_queue, &task);
+        valid_count++;
     }
 
     if (valid_count == 0) return false;
 
-    lv_async_call(cb_show_progress_batch, NULL);
-
-    int enqueued = 0;
-    for (int i = 0; i < valid_count; i++) {
-        transfer_task_t task;
-        memset(&task, 0, sizeof(task));
-        strncpy(task.filename, valid_files[i], sizeof(task.filename) - 1);
-        task.is_upload = true;
-
-        if (tx_queue_push(&g_tx_queue, &task))
-            enqueued++;
+    /* start first transfer */
+    transfer_task_t first;
+    if (tx_queue_pop(&g_tx_queue, &first)) {
+        g_batch_count  = valid_count;
+        g_batch_done   = 0;
+        g_batch_active = true;
+        network_cmd_put(first.filename);
     }
-    return enqueued > 0;
+    return true;
 }
 
 void network_cancel_transfer(void)
 {
     tx_queue_cancel_all(&g_tx_queue);
+    g_batch_active = false;
     g_active_transfers = 0;
 }
