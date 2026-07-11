@@ -379,8 +379,8 @@ typedef struct {
 
 static void cb_show_progress(void *data)
 {
-    /* Popup is already created synchronously by the UI thread.
-     * Network thread only needs to update progress, not create popups. */
+    /* Popup is already created synchronously by the UI button handlers.
+     * Network thread only drives data transfer; UI owns all widgets. */
     free(data);
 }
 
@@ -416,6 +416,17 @@ static void cb_show_error_popup(void *data)
 {
     str_data_t *d = (str_data_t *)data;
     if (d) { ui_show_error_popup(d->text); free(d); }
+}
+
+static void normalize_local_path(const char *filename, char *path, size_t path_sz)
+{
+    const char *src = filename;
+    if (!src || !path || path_sz == 0) return;
+    if (strncmp(src, "./client/", 9) == 0) src += 9;
+    else if (strncmp(src, "client/", 7) == 0) src += 7;
+    else if (strncmp(src, "./", 2) == 0) src += 2;
+
+    snprintf(path, path_sz, "./client/%s", src[0] ? src : "");
 }
 
 /* Start the next queued transfer. Called from main loop when IDLE.
@@ -468,6 +479,7 @@ static void start_download(const char *filename, int filesize)
     g_dl_total    = filesize;
     g_dl_received = 0;
     g_last_progress = -1;
+    g_active_transfers++;
 
     /* create / truncate local file in client/load/ */
     mkdir("./client/load", 0755);
@@ -491,7 +503,7 @@ static void start_download(const char *filename, int filesize)
 
     g_state = ST_DOWNLOADING;
 
-    /* show progress dialog 鈥?must go through async call (UI thread safety) */
+    /* show progress dialog — must go through async call (UI thread safety) */
     {
         show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
         if (spd) {
@@ -529,6 +541,7 @@ static void finish_download(bool success)
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
     g_transfer_cancelled = false;
+    if (g_active_transfers > 0) g_active_transfers--;
 
     printf("[DEBUG] finish_download: %s success=%d batch=%d done=%d/%d queue=%d\n",
            g_dl_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
@@ -564,11 +577,11 @@ static void start_upload(const char *filename)
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
 
     char ul_path[520];
-    snprintf(ul_path, sizeof(ul_path), "./client/%s", filename);
+    normalize_local_path(filename, ul_path, sizeof(ul_path));
     g_ul_fd = open(ul_path, O_RDONLY);
     if (g_ul_fd < 0) {
         str_data_t *err = make_str_data("Local file not found");
-        if (err) lv_async_call(cb_error, err);
+        if (err) lv_async_call(cb_show_error_popup, err);
         g_state = ST_IDLE;
         return;
     }
@@ -586,10 +599,11 @@ static void start_upload(const char *filename)
     strncpy(g_transfer_progress.filename, filename,
             sizeof(g_transfer_progress.filename) - 1);
     g_last_progress = -1;
+    g_active_transfers++;
 
     g_state = ST_UPLOADING;
 
-    /* show progress dialog 鈥?must go through async call (UI thread safety) */
+    /* show progress dialog — must go through async call (UI thread safety) */
     {
         show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
         if (spd) {
@@ -628,6 +642,7 @@ static void finish_upload(bool success)
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
     g_transfer_cancelled = false;
+    if (g_active_transfers > 0) g_active_transfers--;
 
     printf("[DEBUG] finish_upload: %s success=%d batch=%d done=%d/%d queue=%d\n",
            g_ul_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
@@ -740,7 +755,7 @@ void *network_thread_func(void *arg)
     /* ---- create socket and connect ---- */
     g_sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (g_sockfd < 0) {
-        lv_async_call(cb_error, make_str_data("socket() failed"));
+        lv_async_call(cb_show_error_popup, make_str_data("socket() failed"));
         g_network_running = false;
         return NULL;
     }
@@ -752,7 +767,7 @@ void *network_thread_func(void *arg)
     inet_pton(AF_INET, ip, &addr.sin_addr);
 
     if (connect(g_sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        lv_async_call(cb_error, make_str_data("Connect failed"));
+        lv_async_call(cb_show_error_popup, make_str_data("Connect failed"));
         close(g_sockfd);
         g_sockfd = -1;
         g_network_running = false;
@@ -782,7 +797,7 @@ void *network_thread_func(void *arg)
     int rlen;
     unsigned char *rsp = read_packet(g_sockfd, &rlen);
     if (!rsp) {
-        lv_async_call(cb_error, make_str_data("No login response"));
+        lv_async_call(cb_show_error_popup, make_str_data("No login response"));
         close(g_sockfd); g_sockfd = -1;
         g_network_running = false;
         return NULL;
@@ -896,16 +911,21 @@ void *network_thread_func(void *arg)
                 start_download(g_dl_filename, filesize);
             } else {
                 str_data_t *err = make_str_data("Server: file not found");
-                if (err) lv_async_call(cb_error, err);
+                if (err) lv_async_call(cb_show_error_popup, err);
             }
             break;
 
         case FTP_CMD_PUT:
             if (rsp2.res_result == 1) {
-                start_upload(g_ul_filename);
+                if (g_ul_filename[0]) {
+                    start_upload(g_ul_filename);
+                } else {
+                    str_data_t *err = make_str_data("Upload target missing");
+                    if (err) lv_async_call(cb_show_error_popup, err);
+                }
             } else {
                 str_data_t *err = make_str_data("Server rejected upload");
-                if (err) lv_async_call(cb_error, err);
+                if (err) lv_async_call(cb_show_error_popup, err);
             }
             break;
 
@@ -1008,6 +1028,8 @@ bool network_cmd_get(const char *filename)
 
     strncpy(g_dl_filename, filename, sizeof(g_dl_filename) - 1);
     g_state = ST_WAIT_GET_RESP;
+    g_dl_filename[0] = '\0';
+    strncpy(g_dl_filename, filename, sizeof(g_dl_filename) - 1);
 
     int len;
     unsigned char *pkt = build_cmd_with_str(FTP_CMD_GET, filename, &len);
@@ -1024,12 +1046,13 @@ bool network_cmd_put(const char *filename)
     /* check local file exists under ./client/ */
     struct stat st;
     char path[520];
-    snprintf(path, sizeof(path), "./client/%s", filename);
+    normalize_local_path(filename, path, sizeof(path));
     if (stat(path, &st) != 0) {
         return false;
     }
     int filesize = (int)st.st_size;
 
+    g_ul_filename[0] = '\0';
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
     g_state = ST_WAIT_PUT_RESP;
 
@@ -1081,7 +1104,7 @@ bool network_cmd_put_multi(const char **filenames, int count)
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
         char fpath[520];
-        snprintf(fpath, sizeof(fpath), "./client/%s", filenames[i]);
+        normalize_local_path(filenames[i], fpath, sizeof(fpath));
         if (stat(fpath, &st) != 0) {
             str_data_t *err = make_str_data("file unexist");
             if (err) lv_async_call(cb_show_error_popup, err);
