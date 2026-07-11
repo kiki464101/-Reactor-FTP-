@@ -94,6 +94,7 @@ static void on_refresh_btn_clicked(lv_event_t *e);
 static void on_download_btn_clicked(lv_event_t *e);
 static void on_upload_btn_clicked(lv_event_t *e);
 static void on_disconnect_btn_clicked(lv_event_t *e);
+static void on_delete_btn_clicked(lv_event_t *e);
 static void on_cancel_btn_clicked(lv_event_t *e);
 static void on_close_progress_btn_clicked(lv_event_t *e);
 static void on_ta_focused(lv_event_t *e);
@@ -381,6 +382,7 @@ void ui_main_init(void)
     create_btn(btn_row, "Refresh",    90, 34, on_refresh_btn_clicked);
     create_btn(btn_row, "Download",   90, 34, on_download_btn_clicked);
     create_btn(btn_row, "Upload",     90, 34, on_upload_btn_clicked);
+    create_btn(btn_row, "Delete",     90, 34, on_delete_btn_clicked);
     create_btn(btn_row, "Disconnect", 100, 34, on_disconnect_btn_clicked);
 
     /* load the screen (don't switch automatically — ui_switch_to_main does it) */
@@ -760,6 +762,74 @@ static void on_upload_btn_clicked(lv_event_t *e)
     ui_show_progress_batch(); /* show popup synchronously on UI thread */
     if (!network_cmd_put_multi(files, g_local_sel_count))
         ui_show_error("No valid files to upload");
+}
+
+/* ================================================================== */
+/*  Delete button handler – only local files can be deleted           */
+/* ================================================================== */
+static void on_delete_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+
+    /* 选中了远程文件 → 弹窗拦截，不执行任何删除 */
+    if (g_remote_sel_count > 0) {
+        ui_show_error_popup("error delete");
+        return;
+    }
+
+    /* 没有选中任何本地文件 → 状态栏提示 */
+    if (g_local_sel_count == 0) {
+        ui_show_error("No file selected");
+        return;
+    }
+
+    /* 执行本地文件删除 */
+    int success = 0, fail = 0;
+    for (int i = 0; i < g_local_sel_count; i++) {
+        char *name = g_selected_local[i];
+        size_t nlen = strlen(name);
+
+        /* 跳过目录条目（以 "/" 结尾） */
+        if (nlen > 0 && name[nlen - 1] == '/') {
+            fail++;
+            continue;
+        }
+
+        /* 拼接完整路径，与 scan_local_directory 的路径逻辑保持一致 */
+        char path[520];
+        if (g_local_cur_path[0])
+            snprintf(path, sizeof(path), "./client/%s/%s",
+                     g_local_cur_path, name);
+        else
+            snprintf(path, sizeof(path), "./client/%s", name);
+
+        /* 执行删除 */
+        if (remove(path) == 0)
+            success++;
+        else
+            fail++;
+    }
+
+    /* 清空选中状态（提前清，避免刷新过程中引用已删除的文件名） */
+    g_local_sel_count = 0;
+    memset(g_selected_local, 0, sizeof(g_selected_local));
+
+    /* 更新选中计数标签 */
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
+        lv_label_set_text(main_selected_label, buf);
+    }
+
+    /* 刷新本地文件列表 */
+    ui_refresh_local_files();
+
+    /* 显示结果 */
+    if (fail == 0)
+        ui_set_status("Deleted");
+    else
+        ui_show_error("Some files failed to delete");
 }
 
 static void on_disconnect_btn_clicked(lv_event_t *e)
