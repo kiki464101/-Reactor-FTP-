@@ -10,7 +10,7 @@
     - `static char g_local_displayed_files[MAX_DISPLAYED_FILES][256];`
     - `static int  g_local_displayed_count = 0;`
   - [x] 1.2 在 `ui_update_file_list_cb()` 中，遍历 token 添加列表按钮的循环里，同步把每个有效文件名（跳过 "." 、 ".." ）追加到 `g_remote_displayed_files[]`，并更新 `g_remote_displayed_count`；在循环开始前先重置 count 为 0
-  - [ ] 1.3 在 `ui_update_local_file_list_cb()` 中，遍历 token 添加列表按钮的循环里，同步把每个**文件**条目（跳过路径头文本、 ".." 、以 "/" 结尾的目录条目）追加到 `g_local_displayed_files[]`，并更新 `g_local_displayed_count`；在循环开始前先重置 count 为 0
+  - [x] 1.3 在 `ui_update_local_file_list_cb()` 中，遍历 token 添加列表按钮的循环里，同步把每个**文件**条目（跳过路径头文本、 ".." 、以 "/" 结尾的目录条目）追加到 `g_local_displayed_files[]`，并更新 `g_local_displayed_count`；在循环开始前先重置 count 为 0
 
 - [x] Task 2: 新增公共查询函数
   - [x] 2.1 在 `ui_manager.c` 中实现：

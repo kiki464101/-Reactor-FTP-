@@ -11,7 +11,8 @@ enum {
     TASK_LS    = 1,
     TASK_GET   = 2,
     TASK_PUT   = 3,
-    TASK_BYE   = 4,
+    TASK_BYE     = 4,
+    TASK_LISTDIR = 5,
 };
 
 typedef struct {

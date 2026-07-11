@@ -14,6 +14,7 @@ typedef enum {
     FTP_CMD_GET_DATA = 1030,  /* data connection handshake: download */
     FTP_CMD_PUT_DATA = 1031,  /* data connection handshake: upload */
     FTP_CMD_DONE     = 1032,  /* control connection: transfer complete notification */
+    FTP_CMD_LISTDIR  = 1033,  /* recursive directory listing */
 } cmd_no_t;
 
 /* Reads exactly the frame header (8 bytes) then pkg_len payload bytes,

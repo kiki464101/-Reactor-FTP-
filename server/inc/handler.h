@@ -28,7 +28,8 @@ typedef struct client_session {
 void worker_handle_login(client_session_t *sess,
                          const unsigned char *payload, int plen);
 
-void worker_handle_ls(client_session_t *sess);
+void worker_handle_ls(client_session_t *sess,
+                     const unsigned char *payload, int plen);
 
 void worker_handle_get(client_session_t *sess,
                        const unsigned char *payload, int plen);
@@ -37,5 +38,8 @@ void worker_handle_put(client_session_t *sess,
                        const unsigned char *payload, int plen);
 
 void worker_handle_bye(client_session_t *sess);
+
+void worker_handle_listdir(client_session_t *sess,
+                           const unsigned char *payload, int plen);
 
 #endif

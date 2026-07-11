@@ -40,6 +40,7 @@
 #include <sys/poll.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <dirent.h>
 
 /* ------------------------------------------------------------------ */
 /*  Global definitions                                                */
@@ -69,6 +70,76 @@ volatile int      g_active_transfers = 0;
 #define CHUNK_SIZE 4096
 #define CHUNK_DELAY_US 100000   /* 100ms delay per chunk for visible progress bar */
 
+/* --- helper: extract basename from a folder path --- */
+static void folder_basename(const char *path, char *out, size_t out_sz)
+{
+    if (!path || !out || out_sz == 0) return;
+    size_t len = strlen(path);
+    /* strip trailing '/' */
+    const char *end = path + len;
+    while (end > path && *(end - 1) == '/') end--;
+    /* find last '/' */
+    const char *last = end;
+    while (last > path && *(last - 1) != '/') last--;
+    size_t n = (size_t)(end - last);
+    if (n >= out_sz) n = out_sz - 1;
+    memcpy(out, last, n);
+    out[n] = '\0';
+}
+
+/* --- helper: recursively walk a local directory, collect tasks --- */
+static void collect_files_recursive(const char *local_base,
+                                     const char *rel_prefix,
+                                     transfer_task_t *out,
+                                     int *out_count, int max)
+{
+    if (*out_count >= max) return;
+    char scan_dir[520];
+    snprintf(scan_dir, sizeof(scan_dir), "%s/%s", local_base, rel_prefix);
+    DIR *dir = opendir(scan_dir);
+    if (!dir) return;
+    struct dirent *d;
+    while ((d = readdir(dir)) != NULL && *out_count < max) {
+        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+            continue;
+        char item_path[520];
+        snprintf(item_path, sizeof(item_path), "%s/%s", scan_dir, d->d_name);
+        struct stat st;
+        if (stat(item_path, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            char sub[520];
+            snprintf(sub, sizeof(sub), "%s%s/", rel_prefix, d->d_name);
+            collect_files_recursive(local_base, sub, out, out_count, max);
+        } else {
+            memset(&out[*out_count], 0, sizeof(transfer_task_t));
+            snprintf(out[*out_count].filename, sizeof(out[*out_count].filename),
+                     "%s%s", rel_prefix, d->d_name);
+            out[*out_count].is_upload = true;
+            (*out_count)++;
+        }
+    }
+    closedir(dir);
+}
+
+/* --- helper: recursively create directories like mkdir -p --- */
+static void mkdir_p(const char *path)
+{
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    size_t len = strlen(tmp);
+    if (len > 0 && tmp[len - 1] == '/')
+        tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 typedef enum {
     ST_IDLE,
     ST_LOGIN_SENT,
@@ -77,6 +148,7 @@ typedef enum {
     ST_DOWNLOADING,
     ST_WAIT_PUT_RESP,
     ST_UPLOADING,
+    ST_WAIT_LISTDIR_RESP,
 } net_state_t;
 
 static net_state_t  g_state            = ST_IDLE;
@@ -493,7 +565,7 @@ static void start_download(const char *filename, int filesize)
     g_active_transfers++;
 
     /* check local client/load/ for duplicate */
-    if (ui_local_list_has_file(filename)) {
+    if (ui_local_list_has_entry(filename)) {
         str_data_t *err = make_str_data("repeat file");
         if (err) lv_async_call(cb_show_error_popup, err);
         g_state = ST_IDLE;
@@ -501,6 +573,17 @@ static void start_download(const char *filename, int filesize)
     }
 
     /* create / truncate local file in client/load/ */
+    /* if filename contains '/', create parent dirs first */
+    {
+        char dl_dir[520];
+        snprintf(dl_dir, sizeof(dl_dir), "./client/load/%s", filename);
+        char *slash = strrchr(dl_dir, '/');
+        if (slash) {
+            *slash = '\0';
+            mkdir_p(dl_dir);
+            *slash = '/';
+        }
+    }
     mkdir("./client/load", 0755);
     char dl_path[520];
     snprintf(dl_path, sizeof(dl_path), "./client/load/%s", filename);
@@ -931,6 +1014,39 @@ void *network_thread_func(void *arg)
                 continue;
             }
 
+            if (g_state == ST_WAIT_LISTDIR_RESP) {
+                if (rsp2.cmd_no == 1033 && rsp2.res_result == 1) {
+                    /* parse newline-separated file paths, enqueue GET tasks */
+                    int dlen = rsp2.res_len - 1;
+                    char *raw = (char *)malloc((size_t)(dlen + 1));
+                    if (raw) {
+                        memcpy(raw, rsp2.res_data, (size_t)dlen);
+                        raw[dlen] = '\0';
+                        char *save;
+                        char *token = strtok_r(raw, "\n", &save);
+                        while (token) {
+                            if (token[0] != '\0') {
+                                transfer_task_t t;
+                                memset(&t, 0, sizeof(t));
+                                strncpy(t.filename, token, sizeof(t.filename) - 1);
+                                t.is_upload = false;
+                                tx_queue_push(&g_tx_queue, &t);
+                                g_batch_total++;
+                            }
+                            token = strtok_r(NULL, "\n", &save);
+                        }
+                        free(raw);
+                    }
+                    g_state = ST_IDLE;
+                } else {
+                    str_data_t *err = make_str_data("Server: listdir failed");
+                    if (err) lv_async_call(cb_show_error_popup, err);
+                    g_state = ST_IDLE;
+                }
+                free(payload);
+                continue;
+            }
+
             /* ---- ST_IDLE: async notifications (LS, unsolicited) ---- */
             switch (rsp2.cmd_no) {
             case FTP_CMD_LS:
@@ -1023,11 +1139,16 @@ void network_disconnect(void)
     shutdown(g_sockfd, SHUT_RDWR);
 }
 
-bool network_cmd_ls(void)
+bool network_cmd_ls(const char *path)
 {
     if (!g_network_running || g_sockfd < 0) return false;
     int len;
-    unsigned char *pkt = build_cmd(FTP_CMD_LS, NULL, 0, &len);
+    unsigned char *pkt;
+    if (!path || path[0] == '\0') {
+        pkt = build_cmd(FTP_CMD_LS, NULL, 0, &len);
+    } else {
+        pkt = build_cmd_with_str(FTP_CMD_LS, path, &len);
+    }
     if (!pkt) return false;
     write(g_sockfd, pkt, (size_t)len);
     free(pkt);
@@ -1036,11 +1157,34 @@ bool network_cmd_ls(void)
 
 /* ---- Single-file: send directly on main socket (core transfer functions) ---- */
 
+static bool network_cmd_listdir(const char *dirname)
+{
+    if (!g_network_running || g_sockfd < 0 || !dirname) return false;
+    /* strip trailing '/' for the protocol */
+    char clean[256];
+    strncpy(clean, dirname, sizeof(clean) - 1);
+    clean[sizeof(clean) - 1] = '\0';
+    size_t l = strlen(clean);
+    if (l > 0 && clean[l - 1] == '/') clean[l - 1] = '\0';
+
+    int len;
+    unsigned char *pkt = build_cmd_with_str(1033, clean, &len);  /* FTP_CMD_LISTDIR */
+    if (!pkt) return false;
+    write(g_sockfd, pkt, (size_t)len);
+    free(pkt);
+    g_state = ST_WAIT_LISTDIR_RESP;
+    return true;
+}
+
 bool network_cmd_get(const char *filename)
 {
     if (!g_network_running || g_sockfd < 0 || !filename) return false;
 
-    strncpy(g_dl_filename, filename, sizeof(g_dl_filename) - 1);
+    /* if filename ends with '/' it's a folder → use LISTDIR */
+    size_t flen = strlen(filename);
+    if (flen > 0 && filename[flen - 1] == '/')
+        return network_cmd_listdir(filename);
+
     g_state = ST_WAIT_GET_RESP;
     g_dl_filename[0] = '\0';
     strncpy(g_dl_filename, filename, sizeof(g_dl_filename) - 1);
@@ -1077,7 +1221,7 @@ bool network_cmd_put(const char *filename)
     base = base ? base + 1 : filename;
 
     /* check server copy/ for duplicate */
-    if (ui_remote_list_has_file(base)) {
+    if (ui_remote_list_has_entry(base)) {
         str_data_t *err = make_str_data("repeat file");
         if (err) lv_async_call(cb_show_error_popup, err);
         return false;
@@ -1105,6 +1249,27 @@ bool network_cmd_get_multi(const char **filenames, int count)
     int actual = 0;
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
+
+        size_t flen = strlen(filenames[i]);
+        /* folder: check duplicate, then push as-is with "/" suffix */
+        if (flen > 0 && filenames[i][flen - 1] == '/') {
+            char base[256];
+            folder_basename(filenames[i], base, sizeof(base));
+            if (ui_local_list_has_entry(base)) {
+                str_data_t *err = make_str_data("Dirent has exist");
+                if (err) lv_async_call(cb_show_error_popup, err);
+                continue;
+            }
+            transfer_task_t task;
+            memset(&task, 0, sizeof(task));
+            strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
+            task.is_upload = false;
+            if (tx_queue_push(&g_tx_queue, &task))
+                actual++;
+            continue;
+        }
+
+        /* regular file */
         transfer_task_t task;
         memset(&task, 0, sizeof(task));
         strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
@@ -1136,6 +1301,47 @@ bool network_cmd_put_multi(const char **filenames, int count)
     /* validate and push */
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
+
+        size_t flen = strlen(filenames[i]);
+
+        /* folder: recursively collect files, then push individual PUT tasks */
+        if (flen > 0 && filenames[i][flen - 1] == '/') {
+            char local_base[520];
+            normalize_local_path(filenames[i], local_base, sizeof(local_base));
+            /* strip trailing '/' */
+            size_t bl = strlen(local_base);
+            if (bl > 0 && local_base[bl - 1] == '/') local_base[bl - 1] = '\0';
+
+            char base[256];
+            folder_basename(filenames[i], base, sizeof(base));
+            if (ui_remote_list_has_entry(base)) {
+                str_data_t *err = make_str_data("Dirent has exist");
+                if (err) lv_async_call(cb_show_error_popup, err);
+                continue;
+            }
+
+            /* collect all files under this folder */
+            transfer_task_t tasks[MAX_SELECTED_FILES];
+            int task_count = 0;
+            collect_files_recursive(local_base, "", tasks, &task_count, MAX_SELECTED_FILES);
+
+            char sub_prefix[256];
+            folder_basename(filenames[i], sub_prefix, sizeof(sub_prefix));
+            /* prepend folder basename to each task filename */
+            for (int j = 0; j < task_count; j++) {
+                char full_fn[300];
+                snprintf(full_fn, sizeof(full_fn), "%s/%s", sub_prefix, tasks[j].filename);
+                transfer_task_t task;
+                memset(&task, 0, sizeof(task));
+                strncpy(task.filename, full_fn, sizeof(task.filename) - 1);
+                task.is_upload = true;
+                tx_queue_push(&g_tx_queue, &task);
+                valid_count++;
+            }
+            continue;
+        }
+
+        /* regular file */
         char fpath[520];
         normalize_local_path(filenames[i], fpath, sizeof(fpath));
         if (stat(fpath, &st) != 0) {
@@ -1150,7 +1356,7 @@ bool network_cmd_put_multi(const char **filenames, int count)
         {
             const char *base = strrchr(filenames[i], '/');
             base = base ? base + 1 : filenames[i];
-            if (ui_remote_list_has_file(base)) {
+            if (ui_remote_list_has_entry(base)) {
                 str_data_t *err = make_str_data("repeat file");
                 if (err) lv_async_call(cb_show_error_popup, err);
                 continue;

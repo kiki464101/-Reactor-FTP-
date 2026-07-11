@@ -1,0 +1,133 @@
+# Tasks
+
+- [x] Task 1: 服务端 LS 响应标记目录条目
+  - [x] SubTask 1.1: 修改 `server/src/handler.c` 的 `worker_handle_ls`，对每个 `readdir` 条目用 `stat` 检查是否为目录（构建 `MY_FTP_BOOT/d_name` 路径后 stat），若是则在 `d_name` 后添加 "/" 后缀再 snprintf 到 buf
+  - [x] SubTask 1.2: 验证 LS 响应中文件无后缀、目录有 "/" 后缀
+  - [x] SubTask 1.3: 确认 `worker_handle_ls` 仍在 worker 线程中执行（线程安全，fd 独占）
+
+- [x] Task 2: 服务端新增 LISTDIR 命令（复用 epoll + 线程池模式）
+  - [x] SubTask 2.1: `server/inc/protocol.h` 在 `cmd_no_t` 枚举中新增 `FTP_CMD_LISTDIR = 1033`
+  - [x] SubTask 2.2: `server/inc/thread_pool.h` 在 task type 枚举中新增 `TASK_LISTDIR = 5`
+  - [x] SubTask 2.3: `server/src/main.c` 在 `dispatch_command` switch 中新增 `FTP_CMD_LISTDIR` case：
+    - `task.type = TASK_LISTDIR`
+    - `epoll_ctl(g_epfd, EPOLL_CTL_DEL, sess->fd, NULL)` 从 epoll 摘除 fd（保证 worker 独占）
+    - `thread_pool_submit(&g_pool, &task)` 提交到线程池
+  - [x] SubTask 2.4: `server/inc/handler.h` 声明 `worker_handle_listdir`
+  - [x] SubTask 2.5: `server/src/handler.c` 新增 `worker_handle_listdir(sess, payload, plen)` 实现：
+    - 解析 payload 中的目录名（`[4B cmd_no][4B name_len][dirname]`）
+    - 构建 `MY_FTP_BOOT/dirname` 路径
+    - opendir + readdir 递归遍历（跳过 "." 和 ".."）
+    - 收集所有文件相对路径（含目录前缀，如 "myfolder/sub/file.txt"）
+    - 拼接成 "path1\npath2\n" 格式通过 `tx(sess, FTP_CMD_LISTDIR, 1, buf, off)` 发送
+    - 失败时 `tx(sess, FTP_CMD_LISTDIR, 0, ...)`
+    - 递归辅助函数 `listdir_recursive(dir_path, rel_prefix, buf, off, bufsize)`
+  - [x] SubTask 2.6: `server/src/handler.c` 在 `worker_func` switch 中新增 `TASK_LISTDIR` case 调用 `worker_handle_listdir`，完成后复用现有 rearm fd 逻辑（`epoll_ctl(EPOLL_CTL_MOD)`）
+  - [x] SubTask 2.7: 修复 `listdir_recursive` bug —— 目录条目不应添加到响应中（只递归，只返回文件路径）
+
+- [x] Task 3: 客户端 UI 长按事件 + 镜像数组改存目录 + 新查询函数
+  - [x] SubTask 3.1: `client/ui_manager.c` 在 `ui_update_local_file_list_cb` 中删除"跳过目录条目"逻辑，改为也存储目录条目（含 "/" 后缀）到 `g_local_displayed_files[]`。镜像数组仅 UI 线程写入，网络线程只读，单写者模式保证线程安全
+  - [x] SubTask 3.2: `client/ui_manager.c` 新增 `on_local_file_item_long_pressed` 事件处理函数：
+    - 获取条目文本（`lv_list_get_button_text`）
+    - ".." → 忽略，不选中不导航
+    - 以 "/" 结尾 → 选中（加入 `g_selected_local`、高亮、不导航）
+    - 普通文件 → 选中（与单击一致）
+  - [x] SubTask 3.3: `client/ui_manager.c` 在 `ui_update_local_file_list_cb` 创建本地列表 button 时，为每个 button 注册 `LV_EVENT_LONG_PRESSED` 回调到 `on_local_file_item_long_pressed`（与现有 `LV_EVENT_CLICKED` 并存）
+  - [x] SubTask 3.4: `client/ui_manager.c` 新增 `on_remote_file_item_long_pressed` 事件处理函数：
+    - "." 和 ".." → 忽略
+    - 其它 → 选中（与单击选中效果一致）
+  - [x] SubTask 3.5: `client/ui_manager.c` 在 `ui_update_file_list_cb` 创建远程列表 button 时，为每个 button 注册 `LV_EVENT_LONG_PRESSED` 回调到 `on_remote_file_item_long_pressed`
+  - [x] SubTask 3.6: `client/ui_manager.c` 新增 `ui_remote_list_has_entry(name)` 实现：检查 `g_remote_displayed_files[]` 中是否有 "name" 或 "name/" 形式
+  - [x] SubTask 3.7: `client/ui_manager.c` 新增 `ui_local_list_has_entry(name)` 实现：检查 `g_local_displayed_files[]` 中是否有 "name" 或 "name/" 形式
+  - [x] SubTask 3.8: `client/ui_manager.h` 声明 `ui_remote_list_has_entry` 和 `ui_local_list_has_entry`
+
+- [x] Task 4: 客户端上传文件夹遍历 + 重复检测（线程安全队列）
+  - [x] SubTask 4.1: `client/network_task.c` 新增静态辅助函数 `collect_files_recursive(const char *local_base, const char *rel_prefix, transfer_task_t *out, int *out_count, int max)`：
+    - 拼接 `local_base/rel_prefix` 作为扫描目录（local_base 已是 "./client/myfolder" 形式）
+    - opendir + readdir 遍历
+    - 跳过 "." 和 ".."
+    - 子目录 → 递归调用，rel_prefix 更新为 "prefix/subname/"
+    - 普通文件 → 构建 task：filename = "rel_prefix/filename"（如 "myfolder/sub/file.txt"），is_upload = true，存入 out 数组
+    - 注意：rel_prefix 初始为空字符串，第一次调用时 local_base="./client/myfolder", rel_prefix=""
+  - [x] SubTask 4.2: `client/network_task.c` 新增静态辅助函数 `folder_basename(const char *path, char *out, size_t out_sz)`：
+    - 去掉尾部 "/"（若有）
+    - 提取最后一段 "/" 之后的内容作为 basename
+    - 例："test_delete/myfolder/" → "myfolder"
+  - [x] SubTask 4.3: 修改 `network_cmd_put_multi`：
+    - 遍历选中文件时，检测是否以 "/" 结尾
+    - 若是目录：
+      - `normalize_local_path` 构建本地路径（如 "./client/myfolder"）
+      - `folder_basename` 提取 basename
+      - `ui_remote_list_has_entry(basename)` 检测重复
+      - 重复 → `lv_async_call(cb_show_error_popup, make_str_data("Dirent has exist"))`，`continue` 跳过
+      - 不重复 → `collect_files_recursive` 收集所有文件，逐个 `tx_queue_push`（内部 `pthread_mutex_lock` 保护）
+    - 若是文件：保持现有逻辑（stat + S_ISREG 检查 + basename + `ui_remote_list_has_entry` + push）
+  - [x] SubTask 4.4: 验证重复检测对 "name" 和 "name/" 两种形式都生效
+  - [x] SubTask 4.5: 验证 `tx_queue_push` 在 UI 线程调用时与网络线程 `tx_queue_pop` 无竞争（mutex 保护）
+  - [x] SubTask 4.6: 删除死代码 `check_file_exists`（已被 `ui_*_list_has_entry` 替代）
+
+- [x] Task 5: 客户端下载 LISTDIR 流程 + mkdir -p + 重复检测
+  - [x] SubTask 5.1: `client/network_task.c` 在 `net_state_t` 枚举新增 `ST_WAIT_LISTDIR_RESP`（位于 `ST_UPLOADING` 之后）
+  - [x] SubTask 5.2: `client/network_task.c` 新增 `network_cmd_listdir(const char *dirname)` 函数：
+    - 构建 LISTDIR 命令包（复用 `build_cmd_with_str(FTP_CMD_LISTDIR, dirname, &len)`）
+    - `write(g_sockfd, pkt, len)` 发送
+    - 设置 `g_state = ST_WAIT_LISTDIR_RESP`
+    - 保存 dirname 到临时变量供响应处理使用
+  - [x] SubTask 5.3: `client/network_task.c` 修改 `network_cmd_get`：
+    - 检测 filename 尾部 "/"
+    - 若是目录 → 调用 `network_cmd_listdir(filename)` 代替普通 GET 流程，返回 true
+    - 否则保持现有 GET 流程
+  - [x] SubTask 5.4: `client/network_task.c` 在网络线程主循环新增 `ST_WAIT_LISTDIR_RESP` 状态处理（位于 `ST_WAIT_GET_RESP` 处理之后）：
+    - `read_packet(g_sockfd, &rlen)` 读取响应
+    - `parse_response` 解析
+    - 若 `cmd_no == FTP_CMD_LISTDIR && res_result == 1`：
+      - 解析 payload 中的文件列表（按 "\n" 分割，用 `strtok_r`）
+      - 为每个文件路径构建 task(filename=路径, is_upload=false)
+      - `tx_queue_push` 到 `g_tx_queue`（mutex 保护）
+      - 设置 `g_state = ST_IDLE`
+    - 若失败 → `lv_async_call` 弹窗 "Server: listdir failed"，`g_state = ST_IDLE`
+  - [x] SubTask 5.5: `client/network_task.c` 修改 `network_cmd_get_multi`：
+    - 遍历选中文件时，检测是否以 "/" 结尾
+    - 若是目录：
+      - `folder_basename` 提取 basename
+      - `ui_local_list_has_entry(basename)` 检测重复
+      - 重复 → `lv_async_call(cb_show_error_popup, make_str_data("Dirent has exist"))`，`continue` 跳过
+      - 不重复 → 入队 task(filename="myfolder/", is_upload=false)
+    - 若是文件：保持现有逻辑
+  - [x] SubTask 5.6: `client/network_task.c` 新增静态辅助函数 `mkdir_p(const char *path)`（若客户端尚无）：
+    - 复制 path 到 tmp
+    - 去掉尾部 "/"
+    - 遍历字符串，遇到 '/' 临时截断并 mkdir
+    - 最后 mkdir 完整路径
+  - [x] SubTask 5.7: `client/network_task.c` 修改 `start_download`：
+    - 检测 filename 是否含 "/"（`strchr(filename, '/') != NULL`）
+    - 若含 → 提取目录部分（去掉 basename），用 `mkdir_p` 递归创建本地子目录（如 "./client/load/myfolder/sub"）
+    - 然后正常 `open(dl_path, O_WRONLY | O_CREAT | O_TRUNC, 0666)` 创建文件
+  - [x] SubTask 5.8: 验证 `ST_WAIT_LISTDIR_RESP` 状态在网络线程主循环中正确处理，不与 poll 冲突
+  - [x] SubTask 5.9: 清理 `network_cmd_get` 中的冗余 strncpy 代码
+
+- [x] Task 6: 验证进度条弹窗行为 + 线程安全
+  - [x] SubTask 6.1: 确认文件夹上传/下载时 `ui_show_progress_batch` 弹窗正常弹出
+  - [x] SubTask 6.2: 确认 Close 按钮仅隐藏弹窗，传输继续（`on_close_progress_btn_clicked` 已有行为）
+  - [x] SubTask 6.3: 确认 Cancel 按钮调用 `network_cancel_transfer` → `tx_queue_cancel_all`（`pthread_cond_broadcast` 唤醒等待的 worker）+ `g_transfer_cancelled = true`
+  - [x] SubTask 6.4: 确认进度条更新通过 `lv_async_call(cb_dl_progress, ...)` 从网络线程异步到 UI 线程，线程安全
+  - [x] SubTask 6.5: 确认 `g_transfer_cancelled` 为 `volatile bool`，跨线程可见
+
+- [x] Task 7: 编译验证 + 线程安全审查
+  - [x] SubTask 7.1: 服务端编译通过无错误（在 Linux 虚拟机中由用户验证）
+  - [x] SubTask 7.2: 客户端编译通过无错误（在 Linux 虚拟机中由用户验证）
+  - [x] SubTask 7.3: 无新增编译警告
+  - [x] SubTask 7.4: 审查所有共享数据访问：`g_tx_queue`（mutex 保护）、`g_selected_local/remote`（UI 线程独占）、镜像数组（单写者）、`g_state`（网络线程独占）
+  - [x] SubTask 7.5: 审查 epoll 摘除/rearm 配对：LISTDIR 命令 dispatch 时 DEL，worker 完成后 MOD rearm
+
+# Task Dependencies
+- Task 2 依赖 Task 1（服务端 LS 标记目录先于 LISTDIR 命令，便于客户端统一处理目录条目）
+- Task 3 独立（UI 修改不依赖服务端）
+- Task 4 依赖 Task 3（上传遍历使用 `ui_remote_list_has_entry`）
+- Task 5 依赖 Task 2 和 Task 3（下载使用 LISTDIR 命令和 `ui_local_list_has_entry`）
+- Task 6 依赖 Task 4 和 Task 5（进度条验证依赖传输流程完成）
+- Task 7 依赖所有前置任务
+
+# 并行执行建议
+- Task 1 + Task 3 可并行（服务端 LS 标记 + 客户端 UI 修改，无依赖）
+- Task 2 依赖 Task 1，但 Task 2 的 protocol.h/thread_pool.h/main.c 修改可与 Task 3 并行（仅 handler.c 实现依赖 LS 逻辑理解）
+- Task 4 和 Task 5 必须串行（都修改 network_task.c，避免冲突）

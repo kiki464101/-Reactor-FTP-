@@ -29,11 +29,10 @@ int  g_local_sel_count  = 0;
  * so the network layer can query "is this name already shown?"
  * without touching LVGL widget internals. Written only from the UI
  * thread; read by network/worker threads (simple single-writer access). */
-#define MAX_DISPLAYED_FILES 256
-static char g_remote_displayed_files[MAX_DISPLAYED_FILES][256];
-static int  g_remote_displayed_count = 0;
-static char g_local_displayed_files[MAX_DISPLAYED_FILES][256];
-static int  g_local_displayed_count = 0;
+char g_remote_displayed_files[MAX_SELECTED_FILES][256] = {{0}};
+int  g_remote_displayed_count = 0;
+char g_local_displayed_files[MAX_SELECTED_FILES][256]  = {{0}};
+int  g_local_displayed_count  = 0;
 
 /* ------------------------------------------------------------------ */
 /*  Screen objects                                                    */
@@ -94,11 +93,13 @@ static int          batch_prog_count = 0;
 
 /* current local file browsing path */
 static char g_local_cur_path[256] = {0};
+static char g_remote_cur_path[256] = {0};
 
 /* error / confirm popup singletons */
 static lv_obj_t *err_popup      = NULL;
 static lv_obj_t *err_label      = NULL;
-static lv_obj_t *confirm_popup  = NULL;
+static lv_obj_t *confirm_popup = NULL;
+static bool        g_long_pressed = false;  /* suppress click after long-press */
 
 /* ================================================================== */
 /*  Forward declarations of event handlers                            */
@@ -106,6 +107,8 @@ static lv_obj_t *confirm_popup  = NULL;
 static void on_login_btn_clicked(lv_event_t *e);
 static void on_file_item_clicked(lv_event_t *e);
 static void on_local_file_item_clicked(lv_event_t *e);
+static void on_local_file_item_long_pressed(lv_event_t *e);
+static void on_remote_file_item_long_pressed(lv_event_t *e);
 static void on_refresh_btn_clicked(lv_event_t *e);
 static void on_download_btn_clicked(lv_event_t *e);
 static void on_upload_btn_clicked(lv_event_t *e);
@@ -435,7 +438,7 @@ void ui_switch_to_main(void)
 
     /* request initial file list and scan local */
     lv_screen_load(main_screen);
-    network_cmd_ls();
+    network_cmd_ls(NULL);
     ui_refresh_local_files();
 }
 
@@ -695,30 +698,67 @@ void ui_show_error(const char *msg)
 
 static void on_file_item_clicked(lv_event_t *e)
 {
+    /* if a long-press just happened, suppress navigation/selection */
+    if (g_long_pressed) {
+        g_long_pressed = false;
+        return;
+    }
+
     lv_obj_t *btn = lv_event_get_target(e);
     if (!btn || !main_file_list) return;
 
     const char *text = lv_list_get_button_text(main_file_list, btn);
     if (!text) return;
 
-    /* check if already selected (toggle off) */
+    size_t tlen = strlen(text);
+
+    /* ".." entry: navigate to parent directory */
+    if (strcmp(text, "..") == 0) {
+        char *slash = strrchr(g_remote_cur_path, '/');
+        if (slash) *slash = '\0';
+        else g_remote_cur_path[0] = '\0';
+        network_cmd_ls(g_remote_cur_path[0] ? g_remote_cur_path : NULL);
+        return;
+    }
+
+    /* directory (ends with "/"): navigate into it */
+    if (tlen > 0 && text[tlen - 1] == '/') {
+        char dirname[256];
+        strncpy(dirname, text, sizeof(dirname) - 1);
+        dirname[sizeof(dirname) - 1] = '\0';
+        if (tlen < sizeof(dirname)) dirname[tlen - 1] = '\0';
+
+        if (g_remote_cur_path[0])
+            snprintf(g_remote_cur_path, sizeof(g_remote_cur_path),
+                     "%s/%s", g_remote_cur_path, dirname);
+        else
+            strncpy(g_remote_cur_path, dirname, sizeof(g_remote_cur_path) - 1);
+
+        network_cmd_ls(g_remote_cur_path);
+        return;
+    }
+
+    /* regular file: toggle selection, store full path */
+    char full_path[256];
+    if (g_remote_cur_path[0])
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_remote_cur_path, text);
+    else
+        strncpy(full_path, text, sizeof(full_path) - 1);
+
     for (int i = 0; i < g_remote_sel_count; i++) {
-        if (strcmp(g_selected_remote[i], text) == 0) {
+        if (strcmp(g_selected_remote[i], full_path) == 0) {
             lv_obj_remove_style(btn, &style_selected_remote, 0);
-            for (int j = i; j < g_remote_sel_count - 1; j++) {
+            for (int j = i; j < g_remote_sel_count - 1; j++)
                 strncpy(g_selected_remote[j], g_selected_remote[j + 1],
                         sizeof(g_selected_remote[j]) - 1);
-            }
             g_remote_sel_count--;
             goto update_label;
         }
     }
 
-    /* toggle on */
     if (g_remote_sel_count >= MAX_SELECTED_FILES) return;
-
     lv_obj_add_style(btn, &style_selected_remote, 0);
-    strncpy(g_selected_remote[g_remote_sel_count], text,
+    strncpy(g_selected_remote[g_remote_sel_count], full_path,
             sizeof(g_selected_remote[g_remote_sel_count]) - 1);
     g_remote_sel_count++;
 
@@ -735,8 +775,9 @@ static void on_refresh_btn_clicked(lv_event_t *e)
 {
     (void)e;
     ui_set_status("Refreshing...");
-    g_local_cur_path[0] = '\0';  /* reset to top-level */
-    network_cmd_ls();
+    g_local_cur_path[0]  = '\0';  /* reset to top-level */
+    g_remote_cur_path[0] = '\0';  /* reset remote path too */
+    network_cmd_ls(NULL);
     ui_refresh_local_files();
     /* immediately restore status bar */
     if (g_login_ok) {
@@ -819,6 +860,13 @@ static void ui_show_confirm_popup(void)
     /* Singleton: don't duplicate */
     if (confirm_popup && lv_obj_is_valid(confirm_popup))
         return;
+
+    /* close any open error popup to avoid stacking */
+    if (err_popup && lv_obj_is_valid(err_popup)) {
+        lv_obj_del(err_popup);
+        err_popup = NULL;
+        err_label = NULL;
+    }
 
     confirm_popup = lv_obj_create(parent);
     lv_obj_set_size(confirm_popup, 280, 150);
@@ -962,6 +1010,12 @@ void ui_show_error_popup(const char *msg)
         return;
     }
 
+    /* close any open confirm popup to avoid stacking */
+    if (confirm_popup && lv_obj_is_valid(confirm_popup)) {
+        lv_obj_del(confirm_popup);
+        confirm_popup = NULL;
+    }
+
     err_popup = lv_obj_create(parent);
     lv_obj_set_size(err_popup, 280, 150);
     lv_obj_center(err_popup);
@@ -1056,6 +1110,19 @@ void ui_update_file_list_cb(void *data)
 
     /* clear old items */
     lv_obj_clean(main_file_list);
+    g_remote_displayed_count = 0;
+
+    /* show path header and ".." when in a subdirectory */
+    if (g_remote_cur_path[0]) {
+        char hdr[320];
+        snprintf(hdr, sizeof(hdr), "Path: %s/", g_remote_cur_path);
+        lv_list_add_text(main_file_list, hdr);
+        lv_obj_t *back_btn = lv_list_add_button(main_file_list, NULL, "..");
+        lv_obj_add_event_cb(back_btn, on_file_item_clicked,
+                             LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(back_btn, on_remote_file_item_long_pressed,
+                             LV_EVENT_LONG_PRESSED, NULL);
+    }
 
     if (!filelist || strlen(filelist) == 0) {
         lv_list_add_text(main_file_list, "(empty directory)");
@@ -1065,7 +1132,6 @@ void ui_update_file_list_cb(void *data)
 
     /* parse newline-separated entries and add buttons */
     char *save;
-    g_remote_displayed_count = 0;
     char *token = strtok_r(filelist, "\n", &save);
     while (token) {
         /* trim trailing whitespace / carriage return */
@@ -1083,7 +1149,9 @@ void ui_update_file_list_cb(void *data)
         lv_obj_t *btn = lv_list_add_button(main_file_list, NULL, token);
         lv_obj_add_event_cb(btn, on_file_item_clicked, LV_EVENT_CLICKED,
                              NULL);
-        if (g_remote_displayed_count < MAX_DISPLAYED_FILES) {
+        lv_obj_add_event_cb(btn, on_remote_file_item_long_pressed,
+                             LV_EVENT_LONG_PRESSED, NULL);
+        if (g_remote_displayed_count < MAX_SELECTED_FILES) {
             strncpy(g_remote_displayed_files[g_remote_displayed_count],
                     token, sizeof(g_remote_displayed_files[0]) - 1);
             g_remote_displayed_files[g_remote_displayed_count][sizeof(g_remote_displayed_files[0]) - 1] = '\0';
@@ -1179,7 +1247,7 @@ void ui_update_local_file_list_cb(void *data)
     /* show current path in a header text */
     {
         char header[320];
-        snprintf(header, sizeof(header), "Local: ./client/%s",
+        snprintf(header, sizeof(header), "Local: client/%s",
                  g_local_cur_path[0] ? g_local_cur_path : "");
         lv_list_add_text(main_local_list, header);
     }
@@ -1199,10 +1267,8 @@ void ui_update_local_file_list_cb(void *data)
             token[--tlen] = '\0';
         if (tlen == 0) { token = strtok_r(NULL, "\n", &save); continue; }
 
-        /* store only regular file names in the mirror (skip ".." and dirs) */
-        if (strcmp(token, "..") != 0 &&
-            !(tlen > 0 && token[tlen - 1] == '/') &&
-            g_local_displayed_count < MAX_DISPLAYED_FILES) {
+        /* store ALL entries in the mirror (including directories with "/" suffix) */
+        if (g_local_displayed_count < MAX_SELECTED_FILES) {
             strncpy(g_local_displayed_files[g_local_displayed_count],
                     token, sizeof(g_local_displayed_files[0]) - 1);
             g_local_displayed_files[g_local_displayed_count][sizeof(g_local_displayed_files[0]) - 1] = '\0';
@@ -1211,6 +1277,7 @@ void ui_update_local_file_list_cb(void *data)
 
         lv_obj_t *btn = lv_list_add_button(main_local_list, NULL, token);
         lv_obj_add_event_cb(btn, on_local_file_item_clicked, LV_EVENT_CLICKED, NULL);
+        lv_obj_add_event_cb(btn, on_local_file_item_long_pressed, LV_EVENT_LONG_PRESSED, NULL);
         token = strtok_r(NULL, "\n", &save);
     }
     free(filelist);
@@ -1225,28 +1292,159 @@ void ui_update_local_file_list_cb(void *data)
 }
 
 /* ================================================================== */
+/*  Long-press handlers for multi-selection                           */
+/* ================================================================== */
+
+static void on_local_file_item_long_pressed(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    if (!btn || !main_local_list) return;
+
+    const char *text = lv_list_get_button_text(main_local_list, btn);
+    if (!text) return;
+
+    size_t tlen = strlen(text);
+
+    /* ".." entry: ignore */
+    if (strcmp(text, "..") == 0) return;
+
+    /* Build the full relative path for comparison/storage */
+    char full_path[256];
+    if (g_local_cur_path[0])
+        snprintf(full_path, sizeof(full_path), "%s/%s", g_local_cur_path, text);
+    else
+        strncpy(full_path, text, sizeof(full_path) - 1);
+
+    /* toggle selection */
+    for (int i = 0; i < g_local_sel_count; i++) {
+        if (strcmp(g_selected_local[i], full_path) == 0) {
+            lv_obj_remove_style(btn, &style_selected_local, 0);
+            for (int j = i; j < g_local_sel_count - 1; j++) {
+                strncpy(g_selected_local[j], g_selected_local[j + 1],
+                        sizeof(g_selected_local[j]) - 1);
+            }
+            g_local_sel_count--;
+            goto update_label;
+        }
+    }
+
+    /* toggle on */
+    if (g_local_sel_count >= MAX_SELECTED_FILES) return;
+
+    lv_obj_add_style(btn, &style_selected_local, 0);
+    strncpy(g_selected_local[g_local_sel_count], full_path,
+            sizeof(g_selected_local[g_local_sel_count]) - 1);
+    g_local_sel_count++;
+    g_long_pressed = true;  /* suppress the pending CLICKED event */
+
+update_label:
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
+        lv_label_set_text(main_selected_label, buf);
+    }
+}
+
+static void on_remote_file_item_long_pressed(lv_event_t *e)
+{
+    lv_obj_t *btn = lv_event_get_target(e);
+    if (!btn || !main_file_list) return;
+
+    const char *text = lv_list_get_button_text(main_file_list, btn);
+    if (!text) return;
+
+    /* "." or ".." entries: ignore */
+    if (strcmp(text, ".") == 0 || strcmp(text, "..") == 0) return;
+
+    /* build full relative path (with remote current path prefix) */
+    char full_path[256];
+    size_t tlen = strlen(text);
+    if (g_remote_cur_path[0]) {
+        if (tlen > 0 && text[tlen - 1] == '/')
+            snprintf(full_path, sizeof(full_path), "%s/%s",
+                     g_remote_cur_path, text);
+        else
+            snprintf(full_path, sizeof(full_path), "%s/%s",
+                     g_remote_cur_path, text);
+    } else {
+        strncpy(full_path, text, sizeof(full_path) - 1);
+    }
+
+    /* toggle selection using full path */
+    for (int i = 0; i < g_remote_sel_count; i++) {
+        if (strcmp(g_selected_remote[i], full_path) == 0) {
+            lv_obj_remove_style(btn, &style_selected_remote, 0);
+            for (int j = i; j < g_remote_sel_count - 1; j++) {
+                strncpy(g_selected_remote[j], g_selected_remote[j + 1],
+                        sizeof(g_selected_remote[j]) - 1);
+            }
+            g_remote_sel_count--;
+            goto update_label;
+        }
+    }
+
+    /* toggle on */
+    if (g_remote_sel_count >= MAX_SELECTED_FILES) return;
+
+    lv_obj_add_style(btn, &style_selected_remote, 0);
+    strncpy(g_selected_remote[g_remote_sel_count], full_path,
+            sizeof(g_selected_remote[g_remote_sel_count]) - 1);
+    g_remote_sel_count++;
+    g_long_pressed = true;  /* suppress the pending CLICKED event */
+
+update_label:
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
+        lv_label_set_text(main_selected_label, buf);
+    }
+}
+
+/* ================================================================== */
 /*  Query helpers: is a file name currently shown in a list widget?   */
 /* ================================================================== */
-bool ui_remote_list_has_file(const char *name)
+bool ui_remote_list_has_entry(const char *name)
 {
     if (!name) return false;
+    size_t nlen = strlen(name);
     for (int i = 0; i < g_remote_displayed_count; i++) {
         if (strcmp(g_remote_displayed_files[i], name) == 0) return true;
+        /* also check name/ variant */
+        if (nlen > 0 && name[nlen - 1] != '/') {
+            char name_with_slash[260];
+            snprintf(name_with_slash, sizeof(name_with_slash), "%s/", name);
+            if (strcmp(g_remote_displayed_files[i], name_with_slash) == 0) return true;
+        }
     }
     return false;
 }
 
-bool ui_local_list_has_file(const char *name)
+bool ui_local_list_has_entry(const char *name)
 {
     if (!name) return false;
+    size_t nlen = strlen(name);
     for (int i = 0; i < g_local_displayed_count; i++) {
         if (strcmp(g_local_displayed_files[i], name) == 0) return true;
+        /* also check name/ variant */
+        if (nlen > 0 && name[nlen - 1] != '/') {
+            char name_with_slash[260];
+            snprintf(name_with_slash, sizeof(name_with_slash), "%s/", name);
+            if (strcmp(g_local_displayed_files[i], name_with_slash) == 0) return true;
+        }
     }
     return false;
 }
 
 static void on_local_file_item_clicked(lv_event_t *e)
 {
+    /* if a long-press just happened, suppress navigation+selection */
+    if (g_long_pressed) {
+        g_long_pressed = false;
+        return;
+    }
+
     lv_obj_t *btn = lv_event_get_target(e);
     if (!btn || !main_local_list) return;
 

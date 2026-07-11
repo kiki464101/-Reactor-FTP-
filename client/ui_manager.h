@@ -70,8 +70,8 @@ void ui_update_local_file_list_cb(void *data);
 void ui_refresh_local_files(void);
 
 /* Query whether a file name is currently displayed in a list widget. */
-bool ui_remote_list_has_file(const char *name);
-bool ui_local_list_has_file(const char *name);
+bool ui_remote_list_has_entry(const char *name);
+bool ui_local_list_has_entry(const char *name);
 void ui_restore_status_after_delay(void);
 void ui_show_error_popup(const char *msg);
 

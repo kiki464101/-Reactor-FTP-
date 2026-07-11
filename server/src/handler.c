@@ -49,6 +49,15 @@ static void mkdir_p(const char *path)
     mkdir(tmp, 0755);
 }
 
+/* Check path does not contain ".." and is not absolute (starting with '/') */
+static bool is_path_safe(const char *path)
+{
+    if (!path) return false;
+    if (path[0] == '/') return false;   /* absolute path */
+    if (strstr(path, "..")) return false;  /* traversal attempt */
+    return true;
+}
+
 /* ================================================================== */
 /*  worker_func — thread pool entry point                              */
 /* ================================================================== */
@@ -79,7 +88,7 @@ void *worker_func(void *arg)
             worker_handle_login(sess, task.payload, task.payload_len);
             break;
         case TASK_LS:
-            worker_handle_ls(sess);
+            worker_handle_ls(sess, task.payload, task.payload_len);
             break;
         case TASK_GET:
             worker_handle_get(sess, task.payload, task.payload_len);
@@ -89,6 +98,9 @@ void *worker_func(void *arg)
             break;
         case TASK_BYE:
             worker_handle_bye(sess);
+            break;
+        case TASK_LISTDIR:
+            worker_handle_listdir(sess, task.payload, task.payload_len);
             break;
         }
 
@@ -166,16 +178,41 @@ void worker_handle_login(client_session_t *sess,
 }
 
 /* ================================================================== */
-/*  LS – list shared directory                                         */
+/*  LS – list shared directory (optionally a subdirectory)             */
 /* ================================================================== */
-void worker_handle_ls(client_session_t *sess)
+void worker_handle_ls(client_session_t *sess,
+                      const unsigned char *payload, int plen)
 {
     shm_update_status(sess->shm, sess->fd, "Refreshing...");
 
     char  buf[SIZE] = {0};
     int   off = 0;
+    char  dir_to_list[512];
 
-    DIR *dir = opendir(MY_FTP_BOOT);
+    if (plen >= 12) {
+        /* payload = [4B cmd_no] [4B path_len] [path…] */
+        int path_len = get_le32(payload + 4);
+        if (path_len < 0 || 8 + path_len > plen) {
+            tx(sess, FTP_CMD_LS, 0, NULL, 0);
+            shm_update_status(sess->shm, sess->fd, "Online");
+            return;
+        }
+        char path[256] = {0};
+        int copy_len = (path_len < 255) ? path_len : 255;
+        memcpy(path, payload + 8, (size_t)copy_len);
+
+        if (!is_path_safe(path)) {
+            tx(sess, FTP_CMD_LS, 0, NULL, 0);
+            shm_update_status(sess->shm, sess->fd, "Online");
+            return;
+        }
+
+        snprintf(dir_to_list, sizeof(dir_to_list), "%s/%s", MY_FTP_BOOT, path);
+    } else {
+        snprintf(dir_to_list, sizeof(dir_to_list), "%s", MY_FTP_BOOT);
+    }
+
+    DIR *dir = opendir(dir_to_list);
     if (!dir) {
         tx(sess, FTP_CMD_LS, 0, (unsigned char *)"opendir fail", 12);
         shm_update_status(sess->shm, sess->fd, "Online");
@@ -186,12 +223,135 @@ void worker_handle_ls(client_session_t *sess)
     while ((d = readdir(dir)) != NULL) {
         if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
             continue;
-        off += snprintf(buf + off, sizeof(buf) - (size_t)off - 1,
-                        "%s\n", d->d_name);
+
+        char fullpath[512];
+        snprintf(fullpath, sizeof(fullpath), "%s/%s", dir_to_list, d->d_name);
+
+        struct stat st;
+        if (stat(fullpath, &st) == 0 && S_ISDIR(st.st_mode)) {
+            off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                            "%s/\n", d->d_name);
+        } else {
+            off += snprintf(buf + off, sizeof(buf) - (size_t)off,
+                            "%s\n", d->d_name);
+        }
     }
     closedir(dir);
 
     tx(sess, FTP_CMD_LS, 1, (unsigned char *)buf, off);
+    shm_update_status(sess->shm, sess->fd, "Online");
+}
+
+/* ================================================================== */
+/*  LISTDIR recursive helper                                            */
+/* ================================================================== */
+static int listdir_recursive(const char *base_path, const char *rel_prefix,
+                             char *buf, int *off, int bufsize)
+{
+    char full_base[512];
+    snprintf(full_base, sizeof(full_base), "%s/%s", base_path, rel_prefix);
+    /* trim trailing '/' from the search path if present */
+    size_t fb_len = strlen(full_base);
+    if (fb_len > 0 && full_base[fb_len - 1] == '/')
+        full_base[fb_len - 1] = '\0';
+
+    DIR *dir = opendir(full_base[0] ? full_base : ".");
+    if (!dir) return -1;
+
+    struct dirent *d;
+    while ((d = readdir(dir)) != NULL) {
+        if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+            continue;
+
+        char item_path[512];
+        snprintf(item_path, sizeof(item_path), "%s/%s", full_base, d->d_name);
+
+        struct stat st;
+        if (stat(item_path, &st) < 0) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            /* 目录：只递归，不添加目录条目到响应（LISTDIR 只返回文件路径）*/
+            char new_prefix[512];
+            snprintf(new_prefix, sizeof(new_prefix), "%s%s/",
+                     rel_prefix, d->d_name);
+            if (listdir_recursive(base_path, new_prefix, buf, off, bufsize) < 0) {
+                closedir(dir);
+                return -2;
+            }
+        } else {
+            /* entry: prefix + name */
+            int avail = bufsize - *off;
+            if (avail <= 2) { closedir(dir); return -2; }
+            int written = snprintf(buf + *off, (size_t)avail,
+                                   "%s%s\n", rel_prefix, d->d_name);
+            if (written < 0 || written >= avail) { closedir(dir); return -2; }
+            *off += written;
+        }
+    }
+    closedir(dir);
+    return 0;
+}
+
+/* ================================================================== */
+/*  LISTDIR – recursive directory listing                               */
+/* ================================================================== */
+void worker_handle_listdir(client_session_t *sess,
+                           const unsigned char *payload, int plen)
+{
+    shm_update_status(sess->shm, sess->fd, "Refreshing...");
+
+    /* payload = [4B cmd_no] [4B name_len] [dirname…] */
+    if (plen < 12) {
+        tx(sess, FTP_CMD_LISTDIR, 0, NULL, 0);
+        shm_update_status(sess->shm, sess->fd, "Online");
+        return;
+    }
+
+    int name_len = get_le32(payload + 4);
+    if (name_len < 0 || 8 + name_len > plen) {
+        tx(sess, FTP_CMD_LISTDIR, 0, NULL, 0);
+        shm_update_status(sess->shm, sess->fd, "Online");
+        return;
+    }
+
+    char dirname[256] = {0};
+    int copy_len = (name_len < 255) ? name_len : 255;
+    memcpy(dirname, payload + 8, (size_t)copy_len);
+
+    if (!is_path_safe(dirname)) { tx(sess, FTP_CMD_LISTDIR, 0, NULL, 0); return; }
+
+    /* Build full path to the target directory */
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", MY_FTP_BOOT, dirname);
+
+    /* Verify the target exists and is a directory */
+    struct stat st;
+    if (stat(path, &st) < 0 || !S_ISDIR(st.st_mode)) {
+        tx(sess, FTP_CMD_LISTDIR, 0, (unsigned char *)"not a directory", 15);
+        shm_update_status(sess->shm, sess->fd, "Online");
+        return;
+    }
+
+    char  buf[SIZE] = {0};
+    int   off = 0;
+
+    /* Recursive listing: base_path = MY_FTP_BOOT, rel_prefix = dirname/ */
+    char prefix[512] = {0};
+    if (strcmp(dirname, ".") == 0) {
+        prefix[0] = '\0';  /* list root without prefix */
+    } else {
+        snprintf(prefix, sizeof(prefix), "%s/", dirname);
+    }
+
+    int rc = listdir_recursive(MY_FTP_BOOT, prefix, buf, &off, (int)sizeof(buf));
+    if (rc == 0) {
+        tx(sess, FTP_CMD_LISTDIR, 1, (unsigned char *)buf, off);
+    } else {
+        tx(sess, FTP_CMD_LISTDIR, 0,
+            (unsigned char *)(rc == -2 ? "buffer overflow" : "readdir fail"),
+            rc == -2 ? 15 : 12);
+    }
+
     shm_update_status(sess->shm, sess->fd, "Online");
 }
 
@@ -213,6 +373,8 @@ void worker_handle_get(client_session_t *sess,
     char filename[256] = {0};
     int copy_len = (name_len < 255) ? name_len : 255;
     memcpy(filename, payload + 8, (size_t)copy_len);
+
+    if (!is_path_safe(filename)) { tx(sess, FTP_CMD_GET, 0, NULL, 0); return; }
 
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", MY_FTP_BOOT, filename);

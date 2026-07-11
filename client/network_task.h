@@ -98,7 +98,7 @@ bool network_start_connect(const char *ip, const char *port,
 void network_disconnect(void);
 
 /* ---- Single commands (main thread) ---- */
-bool network_cmd_ls(void);
+bool network_cmd_ls(const char *path);
 
 /* ---- Single-file compatibility wrappers ---- */
 bool network_cmd_get(const char *filename);

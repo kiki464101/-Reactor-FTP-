@@ -178,6 +178,12 @@ static void dispatch_command(client_session_t *sess,
         thread_pool_submit(&g_pool, &task);
         break;
 
+    case FTP_CMD_LISTDIR:
+        task.type = TASK_LISTDIR;
+        epoll_ctl(g_epfd, EPOLL_CTL_DEL, sess->fd, NULL);
+        thread_pool_submit(&g_pool, &task);
+        break;
+
     default:
         free(payload);
         break;
