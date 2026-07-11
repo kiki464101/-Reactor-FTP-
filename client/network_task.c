@@ -69,15 +69,6 @@ volatile int      g_active_transfers = 0;
 #define CHUNK_SIZE 4096
 #define CHUNK_DELAY_US 100000   /* 100ms delay per chunk for visible progress bar */
 
-/* Check if a file exists under a given directory */
-static bool check_file_exists(const char *dir, const char *filename)
-{
-    char path[520];
-    snprintf(path, sizeof(path), "%s/%s", dir, filename);
-    struct stat st;
-    return (stat(path, &st) == 0);
-}
-
 typedef enum {
     ST_IDLE,
     ST_LOGIN_SENT,
@@ -329,15 +320,6 @@ static void tx_queue_reset(transfer_queue_t *q)
     pthread_mutex_unlock(&q->mutex);
 }
 
-/* 检查指定目录下是否存在同名文件 */
-static bool check_file_exists(const char *dir, const char *filename)
-{
-    char path[520];
-    snprintf(path, sizeof(path), "%s/%s", dir, filename);
-    struct stat st;
-    return (stat(path, &st) == 0);
-}
-
 /* ------------------------------------------------------------------ */
 /*  Async-callback wrappers sent to UI thread                         */
 /* ------------------------------------------------------------------ */
@@ -511,8 +493,8 @@ static void start_download(const char *filename, int filesize)
     g_active_transfers++;
 
     /* check local client/load/ for duplicate */
-    if (check_file_exists("./client/load", filename)) {
-        str_data_t *err = make_str_data("file have exist");
+    if (ui_local_list_has_file(filename)) {
+        str_data_t *err = make_str_data("repeat file");
         if (err) lv_async_call(cb_show_error_popup, err);
         g_state = ST_IDLE;
         return;
@@ -1095,8 +1077,8 @@ bool network_cmd_put(const char *filename)
     base = base ? base + 1 : filename;
 
     /* check server copy/ for duplicate */
-    if (check_file_exists("./copy", base)) {
-        str_data_t *err = make_str_data("file have exist");
+    if (ui_remote_list_has_file(base)) {
+        str_data_t *err = make_str_data("repeat file");
         if (err) lv_async_call(cb_show_error_popup, err);
         return false;
     }
@@ -1168,8 +1150,8 @@ bool network_cmd_put_multi(const char **filenames, int count)
         {
             const char *base = strrchr(filenames[i], '/');
             base = base ? base + 1 : filenames[i];
-            if (check_file_exists("./copy", base)) {
-                str_data_t *err = make_str_data("file have exist");
+            if (ui_remote_list_has_file(base)) {
+                str_data_t *err = make_str_data("repeat file");
                 if (err) lv_async_call(cb_show_error_popup, err);
                 continue;
             }

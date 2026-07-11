@@ -24,6 +24,17 @@ int  g_remote_sel_count = 0;
 char g_selected_local[MAX_SELECTED_FILES][256]  = {{0}};
 int  g_local_sel_count  = 0;
 
+/* Mirror of file names currently displayed in the LVGL list widgets.
+ * Populated in ui_update_file_list_cb / ui_update_local_file_list_cb
+ * so the network layer can query "is this name already shown?"
+ * without touching LVGL widget internals. Written only from the UI
+ * thread; read by network/worker threads (simple single-writer access). */
+#define MAX_DISPLAYED_FILES 256
+static char g_remote_displayed_files[MAX_DISPLAYED_FILES][256];
+static int  g_remote_displayed_count = 0;
+static char g_local_displayed_files[MAX_DISPLAYED_FILES][256];
+static int  g_local_displayed_count = 0;
+
 /* ------------------------------------------------------------------ */
 /*  Screen objects                                                    */
 /* ------------------------------------------------------------------ */
@@ -1054,6 +1065,7 @@ void ui_update_file_list_cb(void *data)
 
     /* parse newline-separated entries and add buttons */
     char *save;
+    g_remote_displayed_count = 0;
     char *token = strtok_r(filelist, "\n", &save);
     while (token) {
         /* trim trailing whitespace / carriage return */
@@ -1071,6 +1083,12 @@ void ui_update_file_list_cb(void *data)
         lv_obj_t *btn = lv_list_add_button(main_file_list, NULL, token);
         lv_obj_add_event_cb(btn, on_file_item_clicked, LV_EVENT_CLICKED,
                              NULL);
+        if (g_remote_displayed_count < MAX_DISPLAYED_FILES) {
+            strncpy(g_remote_displayed_files[g_remote_displayed_count],
+                    token, sizeof(g_remote_displayed_files[0]) - 1);
+            g_remote_displayed_files[g_remote_displayed_count][sizeof(g_remote_displayed_files[0]) - 1] = '\0';
+            g_remote_displayed_count++;
+        }
         token = strtok_r(NULL, "\n", &save);
     }
 
@@ -1173,12 +1191,23 @@ void ui_update_local_file_list_cb(void *data)
     }
 
     char *save;
+    g_local_displayed_count = 0;
     char *token = strtok_r(filelist, "\n", &save);
     while (token) {
         size_t tlen = strlen(token);
         while (tlen > 0 && (token[tlen-1] == '\r' || token[tlen-1] == ' '))
             token[--tlen] = '\0';
         if (tlen == 0) { token = strtok_r(NULL, "\n", &save); continue; }
+
+        /* store only regular file names in the mirror (skip ".." and dirs) */
+        if (strcmp(token, "..") != 0 &&
+            !(tlen > 0 && token[tlen - 1] == '/') &&
+            g_local_displayed_count < MAX_DISPLAYED_FILES) {
+            strncpy(g_local_displayed_files[g_local_displayed_count],
+                    token, sizeof(g_local_displayed_files[0]) - 1);
+            g_local_displayed_files[g_local_displayed_count][sizeof(g_local_displayed_files[0]) - 1] = '\0';
+            g_local_displayed_count++;
+        }
 
         lv_obj_t *btn = lv_list_add_button(main_local_list, NULL, token);
         lv_obj_add_event_cb(btn, on_local_file_item_clicked, LV_EVENT_CLICKED, NULL);
@@ -1193,6 +1222,27 @@ void ui_update_local_file_list_cb(void *data)
                  g_remote_sel_count, g_local_sel_count);
         lv_label_set_text(main_selected_label, buf);
     }
+}
+
+/* ================================================================== */
+/*  Query helpers: is a file name currently shown in a list widget?   */
+/* ================================================================== */
+bool ui_remote_list_has_file(const char *name)
+{
+    if (!name) return false;
+    for (int i = 0; i < g_remote_displayed_count; i++) {
+        if (strcmp(g_remote_displayed_files[i], name) == 0) return true;
+    }
+    return false;
+}
+
+bool ui_local_list_has_file(const char *name)
+{
+    if (!name) return false;
+    for (int i = 0; i < g_local_displayed_count; i++) {
+        if (strcmp(g_local_displayed_files[i], name) == 0) return true;
+    }
+    return false;
 }
 
 static void on_local_file_item_clicked(lv_event_t *e)
