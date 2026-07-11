@@ -84,6 +84,11 @@ static int          batch_prog_count = 0;
 /* current local file browsing path */
 static char g_local_cur_path[256] = {0};
 
+/* error / confirm popup singletons */
+static lv_obj_t *err_popup      = NULL;
+static lv_obj_t *err_label      = NULL;
+static lv_obj_t *confirm_popup  = NULL;
+
 /* ================================================================== */
 /*  Forward declarations of event handlers                            */
 /* ================================================================== */
@@ -95,6 +100,10 @@ static void on_download_btn_clicked(lv_event_t *e);
 static void on_upload_btn_clicked(lv_event_t *e);
 static void on_disconnect_btn_clicked(lv_event_t *e);
 static void on_delete_btn_clicked(lv_event_t *e);
+static void on_delete_confirm_yes_btn_clicked(lv_event_t *e);
+static void on_delete_confirm_no_btn_clicked(lv_event_t *e);
+static void execute_local_delete(void);
+static void ui_show_confirm_popup(void);
 static void on_cancel_btn_clicked(lv_event_t *e);
 static void on_close_progress_btn_clicked(lv_event_t *e);
 static void on_ta_focused(lv_event_t *e);
@@ -771,50 +780,129 @@ static void on_delete_btn_clicked(lv_event_t *e)
 {
     (void)e;
 
-    /* 选中了远程文件 → 弹窗拦截，不执行任何删除 */
+    /* Priority 1: remote files selected → block with error popup */
     if (g_remote_sel_count > 0) {
         ui_show_error_popup("error delete");
         return;
     }
 
-    /* 没有选中任何本地文件 → 状态栏提示 */
+    /* Priority 2: no local files selected → status bar hint */
     if (g_local_sel_count == 0) {
         ui_show_error("No file selected");
         return;
     }
 
-    /* 执行本地文件删除 */
+    /* Priority 3: show confirmation popup before deleting */
+    ui_show_confirm_popup();
+}
+
+/* ================================================================== */
+/*  Delete confirmation popup                                          */
+/* ================================================================== */
+
+static void ui_show_confirm_popup(void)
+{
+    lv_obj_t *parent = ui_get_window_parent();
+    if (!parent) return;
+
+    /* Singleton: don't duplicate */
+    if (confirm_popup && lv_obj_is_valid(confirm_popup))
+        return;
+
+    confirm_popup = lv_obj_create(parent);
+    lv_obj_set_size(confirm_popup, 280, 150);
+    lv_obj_center(confirm_popup);
+    lv_obj_set_style_bg_color(confirm_popup, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_border_color(confirm_popup, lv_color_hex(0xffaa00), 0);
+    lv_obj_set_style_border_width(confirm_popup, 2, 0);
+    lv_obj_set_style_radius(confirm_popup, 8, 0);
+    lv_obj_set_style_pad_all(confirm_popup, 15, 0);
+    lv_obj_set_flex_flow(confirm_popup, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(confirm_popup,
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    /* Prompt text */
+    lv_obj_t *lbl = lv_label_create(confirm_popup);
+    lv_label_set_text(lbl, "Confirm delete?");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+
+    /* Button row: Yes | No */
+    lv_obj_t *btn_row = lv_obj_create(confirm_popup);
+    lv_obj_set_size(btn_row, LV_PCT(100), 36);
+    lv_obj_set_style_bg_opa(btn_row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_row, 0, 0);
+    lv_obj_set_style_pad_all(btn_row, 0, 0);
+    lv_obj_set_flex_flow(btn_row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(btn_row,
+                          LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+
+    lv_obj_t *yes_btn = lv_button_create(btn_row);
+    lv_obj_set_size(yes_btn, 80, 28);
+    lv_obj_t *yes_lbl = lv_label_create(yes_btn);
+    lv_label_set_text(yes_lbl, "Yes");
+    lv_obj_center(yes_lbl);
+    lv_obj_add_event_cb(yes_btn, on_delete_confirm_yes_btn_clicked,
+                        LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *no_btn = lv_button_create(btn_row);
+    lv_obj_set_size(no_btn, 80, 28);
+    lv_obj_t *no_lbl = lv_label_create(no_btn);
+    lv_label_set_text(no_lbl, "No");
+    lv_obj_center(no_lbl);
+    lv_obj_add_event_cb(no_btn, on_delete_confirm_no_btn_clicked,
+                        LV_EVENT_CLICKED, NULL);
+}
+
+static void on_delete_confirm_yes_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+    execute_local_delete();
+    if (confirm_popup) { lv_obj_del(confirm_popup); confirm_popup = NULL; }
+}
+
+static void on_delete_confirm_no_btn_clicked(lv_event_t *e)
+{
+    (void)e;
+    /* Close popup, keep selection state unchanged */
+    if (confirm_popup) { lv_obj_del(confirm_popup); confirm_popup = NULL; }
+}
+
+/* ================================================================== */
+/*  execute_local_delete — extracted deletion logic (fixed paths)      */
+/* ================================================================== */
+
+static void execute_local_delete(void)
+{
     int success = 0, fail = 0;
+
     for (int i = 0; i < g_local_sel_count; i++) {
         char *name = g_selected_local[i];
         size_t nlen = strlen(name);
 
-        /* 跳过目录条目（以 "/" 结尾） */
+        /* skip directory entries (end with "/") */
         if (nlen > 0 && name[nlen - 1] == '/') {
             fail++;
             continue;
         }
 
-        /* 拼接完整路径，与 scan_local_directory 的路径逻辑保持一致 */
+        /* g_selected_local[i] already contains the subdirectory prefix
+         * (e.g. "load/haha.txt"), so just prepend "./client/" once. */
         char path[520];
-        if (g_local_cur_path[0])
-            snprintf(path, sizeof(path), "./client/%s/%s",
-                     g_local_cur_path, name);
-        else
-            snprintf(path, sizeof(path), "./client/%s", name);
+        snprintf(path, sizeof(path), "./client/%s", name);
 
-        /* 执行删除 */
         if (remove(path) == 0)
             success++;
         else
             fail++;
     }
 
-    /* 清空选中状态（提前清，避免刷新过程中引用已删除的文件名） */
+    /* clear selection before refresh (avoid stale pointers) */
     g_local_sel_count = 0;
     memset(g_selected_local, 0, sizeof(g_selected_local));
 
-    /* 更新选中计数标签 */
     if (main_selected_label) {
         char buf[128];
         snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
@@ -822,10 +910,8 @@ static void on_delete_btn_clicked(lv_event_t *e)
         lv_label_set_text(main_selected_label, buf);
     }
 
-    /* 刷新本地文件列表 */
     ui_refresh_local_files();
 
-    /* 显示结果 */
     if (fail == 0)
         ui_set_status("Deleted");
     else
@@ -844,9 +930,6 @@ static void on_disconnect_btn_clicked(lv_event_t *e)
 /* ================================================================== */
 /*  Error popup handler                                               */
 /* ================================================================== */
-
-static lv_obj_t *err_popup = NULL;
-static lv_obj_t *err_label = NULL;
 
 static void on_close_error_popup_btn_clicked(lv_event_t *e)
 {
