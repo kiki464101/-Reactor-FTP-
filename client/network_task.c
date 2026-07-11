@@ -397,6 +397,7 @@ static void cb_ul_done(void *data)
 static int           g_batch_total  = 0;   /* total files in batch */
 static int           g_batch_done   = 0;   /* files completed */
 static bool          g_batch_active = false;
+static volatile bool g_transfer_cancelled = false;
 
 typedef struct {
     char filename[256];
@@ -418,7 +419,7 @@ static void cb_show_error_popup(void *data)
 }
 
 /* Start the next queued transfer. Called from main loop when IDLE.
- * Returns true if a transfer was started. */
+ * Returns true if a transfer was started successfully. */
 static bool batch_start_next(void)
 {
     if (g_tx_queue.count == 0)
@@ -428,10 +429,20 @@ static bool batch_start_next(void)
     if (!tx_queue_pop(&g_tx_queue, &task))
         return false;
 
+    bool ok;
     if (task.is_upload)
-        return network_cmd_put(task.filename);
+        ok = network_cmd_put(task.filename);
     else
-        return network_cmd_get(task.filename);
+        ok = network_cmd_get(task.filename);
+
+    if (!ok) {
+        /* transfer failed to start — mark as failed and continue */
+        printf("[DEBUG] batch_start_next: failed to start '%s', skipping\n", task.filename);
+        g_batch_done++;
+        /* immediately try next in queue */
+        return batch_start_next();
+    }
+    return true;
 }
 
 /* Check if all batch transfers are complete */
@@ -481,7 +492,7 @@ static void start_download(const char *filename, int filesize)
     g_state = ST_DOWNLOADING;
 
     /* show progress dialog 鈥?must go through async call (UI thread safety) */
-    if (!g_batch_active) {
+    {
         show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
         if (spd) {
             strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
@@ -517,6 +528,7 @@ static void finish_download(bool success)
     g_last_progress = -1;
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
+    g_transfer_cancelled = false;
 
     printf("[DEBUG] finish_download: %s success=%d batch=%d done=%d/%d queue=%d\n",
            g_dl_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
@@ -578,7 +590,7 @@ static void start_upload(const char *filename)
     g_state = ST_UPLOADING;
 
     /* show progress dialog 鈥?must go through async call (UI thread safety) */
-    if (!g_batch_active) {
+    {
         show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
         if (spd) {
             strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
@@ -615,6 +627,7 @@ static void finish_upload(bool success)
     g_last_progress = -1;
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
+    g_transfer_cancelled = false;
 
     printf("[DEBUG] finish_upload: %s success=%d batch=%d done=%d/%d queue=%d\n",
            g_ul_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
@@ -784,6 +797,11 @@ void *network_thread_func(void *arg)
     g_state = ST_IDLE;
     while (g_network_running) {
         if (g_state == ST_DOWNLOADING) {
+            if (g_transfer_cancelled) {
+                finish_download(false);
+                g_transfer_cancelled = false;
+                continue;
+            }
             if (g_dl_received >= g_dl_total) {
                 finish_download(true);
                 continue;
@@ -795,6 +813,11 @@ void *network_thread_func(void *arg)
         }
 
         if (g_state == ST_UPLOADING) {
+            if (g_transfer_cancelled) {
+                finish_upload(false);
+                g_transfer_cancelled = false;
+                continue;
+            }
             if (g_ul_sent >= g_ul_total) {
                 finish_upload(true);
                 continue;
@@ -1063,6 +1086,7 @@ bool network_cmd_put_multi(const char **filenames, int count)
 
 void network_cancel_transfer(void)
 {
+    g_transfer_cancelled = true;
     tx_queue_cancel_all(&g_tx_queue);
     g_batch_active = false;
     g_active_transfers = 0;

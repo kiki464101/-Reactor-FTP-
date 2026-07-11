@@ -550,6 +550,7 @@ void ui_show_progress(const char *filename, bool is_upload)
     lv_bar_set_range(prog_bar, 0, 100);
     lv_bar_set_value(prog_bar, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(prog_bar, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_bg_color(prog_bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR);
     lv_obj_set_style_anim_time(prog_bar, 200, 0);
 
     prog_info = lv_label_create(prog_panel);
@@ -930,8 +931,8 @@ static char *scan_local_directory(const char *subpath)
 
     DIR *dir = opendir(full);
     if (!dir) {
-        snprintf(buf, SIZE - 1, "(cannot open: %s)", full);
-        return buf;
+        free(buf);
+        return NULL;
     }
 
     /* ".." entry if inside a subdirectory */
@@ -963,8 +964,7 @@ static char *scan_local_directory(const char *subpath)
 void ui_refresh_local_files(void)
 {
     char *filelist = scan_local_directory(g_local_cur_path);
-    if (filelist)
-        lv_async_call(ui_update_local_file_list_cb, filelist);
+    lv_async_call(ui_update_local_file_list_cb, filelist); /* NULL is handled inside cb */
 }
 
 void ui_update_local_file_list_cb(void *data)
@@ -973,6 +973,13 @@ void ui_update_local_file_list_cb(void *data)
     if (!main_local_list) { free(filelist); return; }
 
     lv_obj_clean(main_local_list);
+
+    /* handle NULL (directory open failed) */
+    if (!filelist) {
+        lv_list_add_text(main_local_list, "(cannot open)");
+        ui_show_error_popup("Cannot open directory");
+        return;
+    }
 
     /* show current path in a header text */
     {
