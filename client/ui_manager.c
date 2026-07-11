@@ -18,6 +18,12 @@
 
 #define SIZE 4096
 
+/* Multi-selection state */
+char g_selected_remote[MAX_SELECTED_FILES][256] = {{0}};
+int  g_remote_sel_count = 0;
+char g_selected_local[MAX_SELECTED_FILES][256]  = {{0}};
+int  g_local_sel_count  = 0;
+
 /* ------------------------------------------------------------------ */
 /*  Screen objects                                                    */
 /* ------------------------------------------------------------------ */
@@ -38,15 +44,11 @@ static lv_obj_t *login_spinner;
 static lv_obj_t *main_status_bar;
 static lv_obj_t *main_file_list;      /* remote (server) file list */
 static lv_obj_t *main_local_list;   /* local file list */
-static lv_obj_t *main_upload_btn;   /* reference to Upload button */
 
 /* ---- selection highlight style ---- */
 static lv_style_t style_selected_remote;
 static lv_style_t style_selected_local;
-static lv_obj_t *g_prev_remote_btn = NULL;
-static lv_obj_t *g_prev_local_btn = NULL;
-static lv_obj_t *main_upload_ta;
-static lv_obj_t *main_selected_label;   /* shows which file is selected */
+static lv_obj_t *main_selected_label;
 
 /* ---- progress overlay (child of active screen) ---- */
 static lv_obj_t *prog_panel   = NULL;
@@ -56,12 +58,21 @@ static lv_obj_t *prog_info    = NULL;
 /* on-screen keyboard (shared) */
 static lv_obj_t *kb = NULL;
 
-/* ---- transfer-in-progress flag (prevent double-click) ---- */
-static bool g_transferring = false;
+/* ---- multi-transfer batch progress tracking ---- */
+#define MAX_PROGRESS_BARS 10
 
-/* ---- last selected filename ---- */
-static char g_selected_file[256] = {0};       /* selected remote file */
-static char g_local_selected_file[256] = {0};  /* selected local file */
+typedef struct {
+    lv_obj_t *bar;
+    lv_obj_t *label;
+    char      filename[256];
+    bool      is_upload;
+    bool      active;
+    bool      done;
+} prog_slot_t;
+
+static prog_slot_t prog_slots[MAX_PROGRESS_BARS];
+static lv_obj_t   *batch_prog_panel = NULL;
+static int          batch_prog_count = 0;
 
 /* ================================================================== */
 /*  Forward declarations of event handlers                            */
@@ -335,7 +346,7 @@ void ui_main_init(void)
     main_selected_label = lv_label_create(main_screen);
     lv_obj_align(main_selected_label, LV_ALIGN_BOTTOM_LEFT, 10, -48);
     lv_obj_set_style_text_color(main_selected_label, lv_color_hex(0x88ccff), 0);
-    lv_label_set_text(main_selected_label, "Selected: (none)");
+    lv_label_set_text(main_selected_label, "Remote: 0 | Local: 0");
 
     /* ======== action buttons row ======== */
     lv_obj_t *btn_row = lv_obj_create(main_screen);
@@ -349,35 +360,12 @@ void ui_main_init(void)
     lv_obj_set_flex_align(btn_row, LV_FLEX_ALIGN_SPACE_EVENLY,
                           LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
 
-    create_btn(btn_row, "Refresh",  100, 34, on_refresh_btn_clicked);
-    create_btn(btn_row, "Download", 100, 34, on_download_btn_clicked);
-    create_btn(btn_row, "Disconnect", 110, 34, on_disconnect_btn_clicked);
+    create_btn(btn_row, "Refresh",    90, 34, on_refresh_btn_clicked);
+    create_btn(btn_row, "Download",   90, 34, on_download_btn_clicked);
+    create_btn(btn_row, "Upload",     90, 34, on_upload_btn_clicked);
+    create_btn(btn_row, "Disconnect", 100, 34, on_disconnect_btn_clicked);
 
-    /* ======== upload row ======== */
-    lv_obj_t *upload_row = lv_obj_create(main_screen);
-    lv_obj_set_size(upload_row, LV_PCT(100), 44);
-    lv_obj_align(upload_row, LV_ALIGN_BOTTOM_LEFT, 0, -46);
-    lv_obj_set_style_bg_color(upload_row, lv_color_hex(0x1a1a3e), 0);
-    lv_obj_set_style_border_width(upload_row, 0, 0);
-    lv_obj_set_flex_flow(upload_row, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(upload_row, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    lv_obj_t *ul_lbl = lv_label_create(upload_row);
-    lv_label_set_text(ul_lbl, "Upload:");
-    lv_obj_set_style_text_color(ul_lbl, lv_color_hex(0xaaaaaa), 0);
-
-    main_upload_ta = lv_textarea_create(upload_row);
-    lv_obj_set_size(main_upload_ta, 180, 32);
-    lv_textarea_set_placeholder_text(main_upload_ta, "local_file.txt");
-    lv_obj_set_style_pad_left(main_upload_ta, 4, 0);
-    lv_obj_add_event_cb(main_upload_ta, on_ta_focused, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(main_upload_ta, on_ta_focused, LV_EVENT_CLICKED, NULL);
-
-    main_upload_btn = create_btn(upload_row, "Upload", 90, 32, on_upload_btn_clicked);
-    lv_obj_add_state(main_upload_btn, LV_STATE_DISABLED);
-
-    /* load the screen (don't switch automatically ?ui_switch_to_main does it) */
+    /* load the screen (don't switch automatically — ui_switch_to_main does it) */
 }
 
 /* ================================================================== */
@@ -392,7 +380,6 @@ void ui_switch_to_login(void)
         lv_obj_set_style_text_color(login_status, lv_color_hex(0xff6666), 0);
     }
     if (login_btn) lv_obj_clear_state(login_btn, LV_STATE_DISABLED);
-    g_transferring = false;
 }
 
 void ui_switch_to_main(void)
@@ -402,7 +389,8 @@ void ui_switch_to_main(void)
     /* update status bar */
     char sb[128];
     snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
-             lv_textarea_get_text(login_user_ta), g_session_info);
+             g_login_user[0] ? g_login_user : "admin",
+             g_session_info[0] ? g_session_info : "N/A");
     if (main_status_bar) lv_label_set_text(main_status_bar, sb);
 
     /* request initial file list and scan local */
@@ -414,6 +402,165 @@ void ui_switch_to_main(void)
 /* ================================================================== */
 /*  Progress overlay                                                  */
 /* ================================================================== */
+
+void ui_show_progress_batch(void)
+{
+    lv_obj_t *parent = lv_layer_top();
+    if (!parent) return;
+
+    if (batch_prog_panel) return; /* already showing */
+
+    memset(prog_slots, 0, sizeof(prog_slots));
+    batch_prog_count = 0;
+
+    batch_prog_panel = lv_obj_create(parent);
+    lv_obj_set_size(batch_prog_panel, 380, 320);
+    lv_obj_center(batch_prog_panel);
+    lv_obj_set_style_bg_color(batch_prog_panel, lv_color_hex(0x222244), 0);
+    lv_obj_set_style_border_color(batch_prog_panel, lv_color_hex(0x4488cc), 0);
+    lv_obj_set_style_border_width(batch_prog_panel, 2, 0);
+    lv_obj_set_style_radius(batch_prog_panel, 10, 0);
+    lv_obj_set_style_pad_all(batch_prog_panel, 8, 0);
+    lv_obj_set_scrollbar_mode(batch_prog_panel, LV_SCROLLBAR_MODE_AUTO);
+
+    lv_obj_t *title = lv_label_create(batch_prog_panel);
+    lv_label_set_text(title, "Transfer Progress");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+
+    lv_obj_t *cancel_btn = lv_button_create(batch_prog_panel);
+    lv_obj_set_size(cancel_btn, 80, 26);
+    lv_obj_align(cancel_btn, LV_ALIGN_TOP_LEFT, 4, 4);
+    lv_obj_t *cbl2 = lv_label_create(cancel_btn);
+    lv_label_set_text(cbl2, "Cancel All");
+    lv_obj_center(cbl2);
+    lv_obj_add_event_cb(cancel_btn, on_cancel_btn_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *close_btn = lv_button_create(batch_prog_panel);
+    lv_obj_set_size(close_btn, 70, 26);
+    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_t *cbl = lv_label_create(close_btn);
+    lv_label_set_text(cbl, "Close");
+    lv_obj_center(cbl);
+    lv_obj_add_event_cb(close_btn, on_close_progress_btn_clicked, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *cont = lv_obj_create(batch_prog_panel);
+    lv_obj_set_size(cont, LV_PCT(100), 250);
+    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
+    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(cont, 0, 0);
+    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+
+    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
+        lv_obj_t *slot = lv_obj_create(cont);
+        lv_obj_set_size(slot, LV_PCT(95), 40);
+        lv_obj_set_style_bg_opa(slot, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(slot, 0, 0);
+        lv_obj_set_style_pad_all(slot, 0, 0);
+        lv_obj_add_flag(slot, LV_OBJ_FLAG_HIDDEN);
+
+        prog_slots[i].label = lv_label_create(slot);
+        lv_label_set_text(prog_slots[i].label, "");
+        lv_obj_set_style_text_color(prog_slots[i].label, lv_color_hex(0xcccccc), 0);
+        lv_obj_align(prog_slots[i].label, LV_ALIGN_TOP_LEFT, 0, 0);
+
+        prog_slots[i].bar = lv_bar_create(slot);
+        lv_obj_set_size(prog_slots[i].bar, LV_PCT(100), 14);
+        lv_obj_align(prog_slots[i].bar, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_bar_set_range(prog_slots[i].bar, 0, 100);
+    }
+}
+
+void ui_update_transfer_progress(const char *filename, int percent,
+                                  int current_bytes, int total_bytes,
+                                  bool is_upload)
+{
+    if (!batch_prog_panel) {
+        ui_show_progress_batch();
+        if (!batch_prog_panel) return;
+    }
+
+    int slot_idx = -1;
+    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
+        if (prog_slots[i].active &&
+            strcmp(prog_slots[i].filename, filename) == 0 &&
+            prog_slots[i].is_upload == is_upload) {
+            slot_idx = i;
+            break;
+        }
+    }
+
+    if (slot_idx < 0) {
+        for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
+            if (!prog_slots[i].active && !prog_slots[i].done) {
+                slot_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (slot_idx < 0 || slot_idx >= MAX_PROGRESS_BARS) return;
+
+    if (!prog_slots[slot_idx].active) {
+        prog_slots[slot_idx].active = true;
+        strncpy(prog_slots[slot_idx].filename, filename,
+                sizeof(prog_slots[slot_idx].filename) - 1);
+        prog_slots[slot_idx].is_upload = is_upload;
+        batch_prog_count++;
+
+        lv_obj_t *cont = lv_obj_get_child(batch_prog_panel, 3);
+        if (cont) {
+            lv_obj_t *slot_obj = lv_obj_get_child(cont, (uint32_t)slot_idx);
+            if (slot_obj) lv_obj_clear_flag(slot_obj, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
+    lv_bar_set_value(prog_slots[slot_idx].bar, percent, LV_ANIM_ON);
+
+    char buf[256];
+    char sz[32];
+    if (total_bytes >= 1048576)
+        snprintf(sz, sizeof(sz), "%.1f/%.1f MB", current_bytes/1048576.0f, total_bytes/1048576.0f);
+    else if (total_bytes >= 1024)
+        snprintf(sz, sizeof(sz), "%.1f/%.1f KB", current_bytes/1024.0f, total_bytes/1024.0f);
+    else
+        snprintf(sz, sizeof(sz), "%d/%d B", current_bytes, total_bytes);
+
+    snprintf(buf, sizeof(buf), "[%s] %s  %d%%  %s",
+             is_upload ? "UP" : "DL", filename, percent, sz);
+    lv_label_set_text(prog_slots[slot_idx].label, buf);
+
+    ui_update_progress(percent, current_bytes, total_bytes, filename, is_upload);
+}
+
+void ui_on_transfer_done(const char *filename, bool success, bool is_upload)
+{
+    if (!batch_prog_panel) return;
+
+    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
+        if (prog_slots[i].active &&
+            strcmp(prog_slots[i].filename, filename) == 0 &&
+            prog_slots[i].is_upload == is_upload) {
+            prog_slots[i].active = false;
+            prog_slots[i].done = true;
+            batch_prog_count--;
+
+            char buf[256];
+            snprintf(buf, sizeof(buf), "[%s] %s - %s",
+                     is_upload ? "UP" : "DL", filename,
+                     success ? "OK" : "FAILED");
+            lv_label_set_text(prog_slots[i].label, buf);
+            lv_obj_set_style_text_color(prog_slots[i].label,
+                success ? lv_color_hex(0x88ff88) : lv_color_hex(0xff4444), 0);
+            break;
+        }
+    }
+}
+
 void ui_show_progress(const char *filename, bool is_upload)
 {
     lv_obj_t *parent = lv_layer_top();
@@ -475,6 +622,12 @@ void ui_show_progress(const char *filename, bool is_upload)
 
 void ui_hide_progress(void)
 {
+    if (batch_prog_panel) {
+        lv_obj_del(batch_prog_panel);
+        batch_prog_panel = NULL;
+        memset(prog_slots, 0, sizeof(prog_slots));
+        batch_prog_count = 0;
+    }
     if (prog_panel) {
         lv_obj_del(prog_panel);
         prog_panel = NULL;
@@ -482,7 +635,6 @@ void ui_hide_progress(void)
     prog_label = NULL;
     prog_bar   = NULL;
     prog_info  = NULL;
-    g_transferring = false;
 }
 
 void ui_update_progress(int percent, int current_bytes, int total_bytes,
@@ -552,29 +704,34 @@ static void on_file_item_clicked(lv_event_t *e)
     if (!btn || !main_file_list) return;
 
     const char *text = lv_list_get_button_text(main_file_list, btn);
+    if (!text) return;
 
-    /* toggle: click same button again to deselect */
-    if (btn == g_prev_remote_btn) {
-        lv_obj_remove_style(btn, &style_selected_remote, 0);
-        g_prev_remote_btn = NULL;
-        g_selected_file[0] = 0;
-        lv_label_set_text(main_selected_label, "Selected: (none)");
-        return;
+    /* check if already selected (toggle off) */
+    for (int i = 0; i < g_remote_sel_count; i++) {
+        if (strcmp(g_selected_remote[i], text) == 0) {
+            lv_obj_remove_style(btn, &style_selected_remote, 0);
+            for (int j = i; j < g_remote_sel_count - 1; j++) {
+                strncpy(g_selected_remote[j], g_selected_remote[j + 1],
+                        sizeof(g_selected_remote[j]) - 1);
+            }
+            g_remote_sel_count--;
+            goto update_label;
+        }
     }
 
-    /* remove green from previous selection */
-    if (g_prev_remote_btn) {
-        lv_obj_remove_style(g_prev_remote_btn, &style_selected_remote, 0);
-    }
+    /* toggle on */
+    if (g_remote_sel_count >= MAX_SELECTED_FILES) return;
 
-    /* add green to current selection */
     lv_obj_add_style(btn, &style_selected_remote, 0);
-    g_prev_remote_btn = btn;
+    strncpy(g_selected_remote[g_remote_sel_count], text,
+            sizeof(g_selected_remote[g_remote_sel_count]) - 1);
+    g_remote_sel_count++;
 
-    if (text) {
-        strncpy(g_selected_file, text, sizeof(g_selected_file) - 1);
-        char buf[280];
-        snprintf(buf, sizeof(buf), "Selected: %s", text);
+update_label:
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
         lv_label_set_text(main_selected_label, buf);
     }
 }
@@ -585,39 +742,56 @@ static void on_refresh_btn_clicked(lv_event_t *e)
     ui_set_status("Refreshing...");
     network_cmd_ls();
     ui_refresh_local_files();
+    /* immediately restore status bar */
+    if (g_login_ok) {
+        char sb[128];
+        snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
+                 g_login_user[0] ? g_login_user : "admin",
+                 g_session_info[0] ? g_session_info : "N/A");
+        ui_set_status(sb);
+    }
 }
 
 static void on_download_btn_clicked(lv_event_t *e)
 {
     (void)e;
-    if (g_transferring) {
+    if (g_active_transfers > 0) {
         ui_show_error("Transfer already in progress");
         return;
     }
-    if (strlen(g_selected_file) == 0) {
+    if (g_remote_sel_count == 0) {
         ui_show_error("No file selected");
         return;
     }
+
+    const char *files[MAX_SELECTED_FILES];
+    for (int i = 0; i < g_remote_sel_count; i++)
+        files[i] = g_selected_remote[i];
+
     ui_set_status("Downloading...");
-    network_cmd_get(g_selected_file);
+    if (!network_cmd_get_multi(files, g_remote_sel_count))
+        ui_show_error("Failed to start download");
 }
 
 static void on_upload_btn_clicked(lv_event_t *e)
 {
     (void)e;
-    if (g_transferring) {
+    if (g_active_transfers > 0) {
         ui_show_error("Transfer already in progress");
         return;
     }
-    const char *fname = lv_textarea_get_text(main_upload_ta);
-    if (!fname || strlen(fname) == 0) {
-        ui_show_error("Enter a filename to upload");
+    if (g_local_sel_count == 0) {
+        ui_show_error("No file selected");
         return;
     }
+
+    const char *files[MAX_SELECTED_FILES];
+    for (int i = 0; i < g_local_sel_count; i++)
+        files[i] = g_selected_local[i];
+
     ui_set_status("Uploading...");
-    if (!network_cmd_put(fname)) {
-        ui_show_error_popup("file unexist");
-    }
+    if (!network_cmd_put_multi(files, g_local_sel_count))
+        ui_show_error("No valid files to upload");
 }
 
 static void on_disconnect_btn_clicked(lv_event_t *e)
@@ -669,7 +843,12 @@ void ui_show_error_popup(const char *msg)
 static void on_close_progress_btn_clicked(lv_event_t *e)
 {
     (void)e;
-    /* just hide the popup, transfer continues in background */
+    if (batch_prog_panel) {
+        lv_obj_del(batch_prog_panel);
+        batch_prog_panel = NULL;
+        memset(prog_slots, 0, sizeof(prog_slots));
+        batch_prog_count = 0;
+    }
     if (prog_panel) {
         lv_obj_del(prog_panel);
         prog_panel = NULL;
@@ -750,7 +929,8 @@ void ui_update_file_list_cb(void *data)
     }
 
     free(filelist);
-    g_selected_file[0] = '\0';
+    g_remote_sel_count = 0;
+    memset(g_selected_remote, 0, sizeof(g_selected_remote));
 }
 
 /* ================================================================== */
@@ -769,7 +949,7 @@ static char *scan_local_directory(void)
     int off = 0;
     buf[0] = '\0';
 
-    DIR *dir = opendir("./load");
+    DIR *dir = opendir(".");
     if (!dir) {
         strncpy(buf, "(cannot open cwd)", SIZE - 1);
         return buf;
@@ -778,6 +958,10 @@ static char *scan_local_directory(void)
     struct dirent *d;
     while ((d = readdir(dir)) != NULL) {
         if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+            continue;
+        /* skip directories */
+        struct stat st;
+        if (stat(d->d_name, &st) == 0 && S_ISDIR(st.st_mode))
             continue;
         off += snprintf(buf + off, (size_t)(SIZE - off - 1),
                         "%s\n", d->d_name);
@@ -819,6 +1003,14 @@ void ui_update_local_file_list_cb(void *data)
         token = strtok_r(NULL, "\n", &save);
     }
     free(filelist);
+    g_local_sel_count = 0;
+    memset(g_selected_local, 0, sizeof(g_selected_local));
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
+        lv_label_set_text(main_selected_label, buf);
+    }
 }
 
 static void on_local_file_item_clicked(lv_event_t *e)
@@ -827,10 +1019,34 @@ static void on_local_file_item_clicked(lv_event_t *e)
     if (!btn || !main_local_list) return;
 
     const char *text = lv_list_get_button_text(main_local_list, btn);
-    if (text) {
-        strncpy(g_local_selected_file, text, sizeof(g_local_selected_file) - 1);
-        char buf[280];
-        snprintf(buf, sizeof(buf), "Selected: %s (local)", text);
+    if (!text) return;
+
+    /* check if already selected (toggle off) */
+    for (int i = 0; i < g_local_sel_count; i++) {
+        if (strcmp(g_selected_local[i], text) == 0) {
+            lv_obj_remove_style(btn, &style_selected_local, 0);
+            for (int j = i; j < g_local_sel_count - 1; j++) {
+                strncpy(g_selected_local[j], g_selected_local[j + 1],
+                        sizeof(g_selected_local[j]) - 1);
+            }
+            g_local_sel_count--;
+            goto update_label;
+        }
+    }
+
+    /* toggle on */
+    if (g_local_sel_count >= MAX_SELECTED_FILES) return;
+
+    lv_obj_add_style(btn, &style_selected_local, 0);
+    strncpy(g_selected_local[g_local_sel_count], text,
+            sizeof(g_selected_local[g_local_sel_count]) - 1);
+    g_local_sel_count++;
+
+update_label:
+    if (main_selected_label) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Remote: %d | Local: %d",
+                 g_remote_sel_count, g_local_sel_count);
         lv_label_set_text(main_selected_label, buf);
     }
 }
@@ -845,7 +1061,8 @@ static void restore_status_timer_cb(lv_timer_t *t)
     if (g_login_ok) {
         char sb[128];
         snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
-                 lv_textarea_get_text(login_user_ta), g_session_info);
+                 g_login_user[0] ? g_login_user : "admin",
+                 g_session_info[0] ? g_session_info : "N/A");
         ui_set_status(sb);
     }
 }

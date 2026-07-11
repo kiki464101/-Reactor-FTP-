@@ -2,9 +2,9 @@
  * @file ui_manager.h
  * @brief LVGL UI Manager for FTP client
  *
- * Manages three screens:  login, main (file list), and a progress
- * overlay.  All LVGL widget operations run on the UI thread; the
- * network thread pushes data through lv_async_call().
+ * Manages three screens: login, main (file list with multi-select),
+ * and a progress overlay.  All LVGL widget operations run on the UI
+ * thread; the network thread pushes data through lv_async_call().
  */
 
 #ifndef UI_MANAGER_H
@@ -13,10 +13,23 @@
 #include "../lvgl/lvgl.h"
 
 /* ------------------------------------------------------------------ */
+/*  Constants                                                         */
+/* ------------------------------------------------------------------ */
+#define MAX_SELECTED_FILES  128
+
+/* ------------------------------------------------------------------ */
 /*  Screen references                                                 */
 /* ------------------------------------------------------------------ */
 extern lv_obj_t *login_screen;
 extern lv_obj_t *main_screen;
+
+/* ------------------------------------------------------------------ */
+/*  Multi-selection state                                             */
+/* ------------------------------------------------------------------ */
+extern char g_selected_remote[MAX_SELECTED_FILES][256];
+extern int  g_remote_sel_count;
+extern char g_selected_local[MAX_SELECTED_FILES][256];
+extern int  g_local_sel_count;
 
 /* ------------------------------------------------------------------ */
 /*  Initialisation (call once from main())                            */
@@ -34,9 +47,14 @@ void ui_switch_to_main(void);
 /*  Progress overlay                                                  */
 /* ------------------------------------------------------------------ */
 void ui_show_progress(const char *filename, bool is_upload);
+void ui_show_progress_batch(void);
 void ui_hide_progress(void);
 void ui_update_progress(int percent, int current_bytes, int total_bytes,
                         const char *filename, bool is_upload);
+void ui_update_transfer_progress(const char *filename, int percent,
+                                  int current_bytes, int total_bytes,
+                                  bool is_upload);
+void ui_on_transfer_done(const char *filename, bool success, bool is_upload);
 
 /* ------------------------------------------------------------------ */
 /*  Status & error                                                    */
@@ -47,18 +65,10 @@ void ui_show_error(const char *msg);
 /* ------------------------------------------------------------------ */
 /*  Async callbacks (called from network thread via lv_async_call)    */
 /* ------------------------------------------------------------------ */
-void ui_update_file_list_cb(void *data);   /* data = malloc'd char* */
-
-/* async callback: update local file list from scan result */
+void ui_update_file_list_cb(void *data);
 void ui_update_local_file_list_cb(void *data);
-
-/* scan local working directory and refresh the local file list via async call */
 void ui_refresh_local_files(void);
-
-/* restore status bar to connected state after a short delay */
 void ui_restore_status_after_delay(void);
-
-/* show a centered popup with a Close button (for errors like "file unexist") */
 void ui_show_error_popup(const char *msg);
 
 #endif /* UI_MANAGER_H */
