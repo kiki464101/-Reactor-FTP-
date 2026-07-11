@@ -2,20 +2,20 @@
 
 所有修改集中在 `client/ui_manager.c` 一个文件中。
 
-- [ ] Task 1: 新增确认弹窗相关的前向声明和静态变量
-  - [ ] 1.1 在前向声明区（`on_delete_btn_clicked` 之后）添加：
+- [x] Task 1: 新增确认弹窗相关的前向声明和静态变量
+  - [x] 1.1 在前向声明区（`on_delete_btn_clicked` 之后）添加：
     ```
     static void on_delete_confirm_yes_btn_clicked(lv_event_t *e);
     static void on_delete_confirm_no_btn_clicked(lv_event_t *e);
     static void execute_local_delete(void);
     ```
-  - [ ] 1.2 在 error popup 静态变量附近添加确认弹窗变量：
+  - [x] 1.2 在 error popup 静态变量附近添加确认弹窗变量：
     ```
     static lv_obj_t *confirm_popup = NULL;
     ```
 
-- [ ] Task 2: 实现 `ui_show_confirm_popup()` 确认弹窗函数
-  - [ ] 2.1 在 `ui_show_error_popup()` 函数之后添加新函数，逻辑如下：
+- [x] Task 2: 实现 `ui_show_confirm_popup()` 确认弹窗函数
+  - [x] 2.1 在 `ui_show_error_popup()` 函数之后添加新函数，逻辑如下：
     - 单例保护：如果 `confirm_popup` 已存在且有效，直接 return
     - 创建弹窗容器（280x150），居中，红色边框
     - 使用 flex column 布局
@@ -24,17 +24,17 @@
     - Yes 按钮绑定 `on_delete_confirm_yes_btn_clicked`
     - No 按钮绑定 `on_delete_confirm_no_btn_clicked`
 
-- [ ] Task 3: 实现 Yes/No 按钮回调
-  - [ ] 3.1 实现 `on_delete_confirm_yes_btn_clicked()`：
+- [x] Task 3: 实现 Yes/No 按钮回调
+  - [x] 3.1 实现 `on_delete_confirm_yes_btn_clicked()`：
     - 调用 `execute_local_delete()` 执行删除
     - 销毁弹窗：`lv_obj_del(confirm_popup); confirm_popup = NULL;`
-  - [ ] 3.2 实现 `on_delete_confirm_no_btn_clicked()`：
+  - [x] 3.2 实现 `on_delete_confirm_no_btn_clicked()`：
     - 仅销毁弹窗：`lv_obj_del(confirm_popup); confirm_popup = NULL;`
     - 不执行删除，不修改选中状态
 
-- [ ] Task 4: 实现 `execute_local_delete()` 函数（从原 `on_delete_btn_clicked` 提取）
-  - [ ] 4.1 将原 `on_delete_btn_clicked` 中第 786-832 行的删除逻辑提取为独立函数 `execute_local_delete()`
-  - [ ] 4.2 **修复路径拼接 bug**：将原来的
+- [x] Task 4: 实现 `execute_local_delete()` 函数（从原 `on_delete_btn_clicked` 提取）
+  - [x] 4.1 将原 `on_delete_btn_clicked` 中第 786-832 行的删除逻辑提取为独立函数 `execute_local_delete()`
+  - [x] 4.2 **修复路径拼接 bug**：将原来的
     ```
     if (g_local_cur_path[0])
         snprintf(path, sizeof(path), "./client/%s/%s", g_local_cur_path, name);
@@ -48,15 +48,15 @@
     原因：`g_selected_local[i]` 在 `on_local_file_item_clicked` 中已存储完整相对路径（如 `"load/haha.txt"`），不应再拼接 `g_local_cur_path`，否则路径变成 `./client/load/load/haha.txt`（重复）
   - 其余逻辑（跳过目录条目、remove、清空选中、刷新、显示结果）保持不变
 
-- [ ] Task 5: 重构 `on_delete_btn_clicked()`
-  - [ ] 5.1 修改 `on_delete_btn_clicked` 逻辑为：
+- [x] Task 5: 重构 `on_delete_btn_clicked()`
+  - [x] 5.1 修改 `on_delete_btn_clicked` 逻辑为：
     - 选中远程文件 → `ui_show_error_popup("error delete")`，return（不变）
     - 未选中本地文件 → `ui_show_error("No file selected")`，return（不变）
     - 选中本地文件 → 调用 `ui_show_confirm_popup("Confirm delete?")`，return（**新增**，不再直接删除）
-  - [ ] 5.2 删除原函数中的删除逻辑（已移至 `execute_local_delete()`）
+  - [x] 5.2 删除原函数中的删除逻辑（已移至 `execute_local_delete()`）
 
-- [ ] Task 6: 编译验证
-  - [ ] 6.1 代码审查：确认所有函数引用、变量引用正确
+- [x] Task 6: 编译验证（代码审查通过，需用户在 Linux 虚拟机中编译）
+  - [x] 6.1 代码审查：确认所有函数引用、变量引用正确
   - [ ] 6.2 用户在 Linux 虚拟机中编译验证
 
 # Task Dependencies

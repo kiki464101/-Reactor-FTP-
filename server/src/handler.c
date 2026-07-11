@@ -30,6 +30,25 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 
+/* Recursively create directories like mkdir -p */
+static void mkdir_p(const char *path)
+{
+    char tmp[512];
+    strncpy(tmp, path, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+    size_t len = strlen(tmp);
+    if (len > 0 && tmp[len - 1] == '/')
+        tmp[len - 1] = '\0';
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, 0755);
+}
+
 /* ================================================================== */
 /*  worker_func — thread pool entry point                              */
 /* ================================================================== */
@@ -272,6 +291,17 @@ void worker_handle_put(client_session_t *sess,
 
     char path[512];
     snprintf(path, sizeof(path), "%s/%s", MY_FTP_BOOT, filename);
+
+    /* create parent directories if filename contains '/' */
+    char *slash = strrchr(path, '/');
+    if (slash) {
+        char dir[512];
+        size_t dlen = (size_t)(slash - path);
+        if (dlen >= sizeof(dir)) dlen = sizeof(dir) - 1;
+        memcpy(dir, path, dlen);
+        dir[dlen] = '\0';
+        mkdir_p(dir);
+    }
 
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {

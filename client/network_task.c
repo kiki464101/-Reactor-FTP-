@@ -67,6 +67,7 @@ volatile int      g_active_transfers = 0;
 /*  Internal download state                                           */
 /* ------------------------------------------------------------------ */
 #define CHUNK_SIZE 4096
+#define CHUNK_DELAY_US 200000   /* 100ms delay per chunk for visible progress bar */
 
 typedef enum {
     ST_IDLE,
@@ -313,6 +314,9 @@ static void tx_queue_reset(transfer_queue_t *q)
 {
     pthread_mutex_lock(&q->mutex);
     q->cancelled = false;
+    q->head = 0;
+    q->tail = 0;
+    q->count = 0;
     pthread_mutex_unlock(&q->mutex);
 }
 
@@ -517,7 +521,7 @@ static void start_download(const char *filename, int filesize)
 static void update_dl_progress(void)
 {
     int pct = (g_dl_total > 0) ? (g_dl_received * 100 / g_dl_total) : 0;
-    if (pct - g_last_progress < 2 && pct < 100) return;
+    if (pct - g_last_progress < 1 && pct < 100) return;
     g_last_progress = pct;
 
     transfer_progress_t *tp = (transfer_progress_t *)malloc(sizeof(transfer_progress_t));
@@ -609,8 +613,8 @@ static void start_upload(const char *filename)
 static void update_ul_progress(void)
 {
     int pct = (g_ul_total > 0) ? (g_ul_sent * 100 / g_ul_total) : 0;
-    /* update every 2% increment (or at 100% final), avoid flooding async calls */
-    if (pct - g_last_progress < 2 && pct < 100) return;
+    /* update every 1% increment (or at 100% final), avoid flooding async calls */
+    if (pct - g_last_progress < 1 && pct < 100) return;
     g_last_progress = pct;
 
     transfer_progress_t *tp = (transfer_progress_t *)malloc(sizeof(transfer_progress_t));
@@ -680,6 +684,7 @@ static int handle_download_chunk(void)
     int w = (int)write(g_dl_fd, buf, (size_t)r);
     if (w < 0) return -1;
     g_dl_received += w;
+    usleep(CHUNK_DELAY_US);      /* visible progress bar */
     update_dl_progress();
     return 0;
 }
@@ -703,6 +708,7 @@ static int handle_upload_chunk(void)
         return -1;                                    /* network error */
     }
     g_ul_sent += w;
+    usleep(CHUNK_DELAY_US);      /* visible progress bar */
     update_ul_progress();
     return 0;
 }
@@ -1050,14 +1056,20 @@ bool network_cmd_put(const char *filename)
     if (stat(path, &st) != 0) {
         return false;
     }
+    /* only upload regular files, skip directories */
+    if (!S_ISREG(st.st_mode)) return false;
     int filesize = (int)st.st_size;
 
     g_ul_filename[0] = '\0';
     strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
     g_state = ST_WAIT_PUT_RESP;
 
+    /* send only basename to server — local read still uses full path */
+    const char *base = strrchr(filename, '/');
+    base = base ? base + 1 : filename;
+
     int len;
-    unsigned char *pkt = build_cmd_put(filename, filesize, &len);
+    unsigned char *pkt = build_cmd_put(base, filesize, &len);
     if (!pkt) return false;
     write(g_sockfd, pkt, (size_t)len);
     free(pkt);
@@ -1116,6 +1128,8 @@ bool network_cmd_put_multi(const char **filenames, int count)
             if (err) lv_async_call(cb_show_error_popup, err);
             continue;
         }
+        /* skip directories — only upload regular files */
+        if (!S_ISREG(st.st_mode)) continue;
         transfer_task_t task;
         memset(&task, 0, sizeof(task));
         strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
