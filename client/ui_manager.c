@@ -318,12 +318,14 @@ void ui_main_init(void)
     lv_obj_set_style_bg_color(remote_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(remote_cont, lv_color_hex(0x334466), 0);
     lv_obj_set_style_radius(remote_cont, 6, 0);
-    lv_obj_set_scrollbar_mode(remote_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(remote_cont, LV_SCROLLBAR_MODE_OFF);
 
     main_file_list = lv_list_create(remote_cont);
     lv_obj_set_size(main_file_list, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(main_file_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(main_file_list, 0, 0);
+    lv_obj_set_scrollbar_mode(main_file_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(main_file_list, LV_DIR_VER);
     lv_list_add_text(main_file_list, "Click Refresh");
 
     /* ======== local file list (bottom half, same size) ======== */
@@ -338,12 +340,14 @@ void ui_main_init(void)
     lv_obj_set_style_bg_color(local_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(local_cont, lv_color_hex(0x334466), 0);
     lv_obj_set_style_radius(local_cont, 6, 0);
-    lv_obj_set_scrollbar_mode(local_cont, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scrollbar_mode(local_cont, LV_SCROLLBAR_MODE_OFF);
 
     main_local_list = lv_list_create(local_cont);
     lv_obj_set_size(main_local_list, LV_PCT(100), LV_PCT(100));
     lv_obj_set_style_bg_opa(main_local_list, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(main_local_list, 0, 0);
+    lv_obj_set_scrollbar_mode(main_local_list, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_scroll_dir(main_local_list, LV_DIR_VER);
     lv_list_add_text(main_local_list, "Click Refresh");
     /* ======== selected file display ======== */
     main_selected_label = lv_label_create(main_screen);

@@ -379,9 +379,9 @@ typedef struct {
 
 static void cb_show_progress(void *data)
 {
-    show_progress_data_t *d = (show_progress_data_t *)data;
-    ui_show_progress(d->filename, d->is_upload);
-    free(d);
+    /* Popup is already created synchronously by the UI thread.
+     * Network thread only needs to update progress, not create popups. */
+    free(data);
 }
 
 static void cb_ul_done(void *data)
@@ -663,6 +663,15 @@ static int handle_download_chunk(void)
     unsigned char buf[CHUNK_SIZE];
     int remaining = g_dl_total - g_dl_received;
     int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+
+    /* poll first so Cancel can interrupt the blocking read */
+    struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
+    int pr = poll(&pfd, 1, 100);
+    if (pr <= 0) {
+        if (g_transfer_cancelled) return -1;
+        return 0; /* timeout — loop will retry */
+    }
+
     int r = read_n(g_sockfd, buf, to_read);
     if (r <= 0) return -1;
     int w = (int)write(g_dl_fd, buf, (size_t)r);
@@ -680,8 +689,19 @@ static int handle_upload_chunk(void)
     unsigned char buf[CHUNK_SIZE];
     int remaining = g_ul_total - g_ul_sent;
     int to_read = (remaining < CHUNK_SIZE) ? remaining : CHUNK_SIZE;
+
+    /* read from local file (non-blocking — regular file always ready) */
     int r = (int)read(g_ul_fd, buf, (size_t)to_read);
     if (r <= 0) return -1;
+
+    /* poll socket for writability so Cancel can interrupt */
+    struct pollfd pfd = { .fd = g_sockfd, .events = POLLOUT };
+    int pr = poll(&pfd, 1, 100);
+    if (pr <= 0) {
+        if (g_transfer_cancelled) return -1;
+        return 0; /* timeout — loop will retry */
+    }
+
     int w = (int)write(g_sockfd, buf, (size_t)r);
     if (w < 0) return -1;
     g_ul_sent += w;
