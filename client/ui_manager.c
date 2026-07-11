@@ -306,14 +306,14 @@ void ui_main_init(void)
     lv_label_set_text(path_lbl, "Directory: /remote_share/");
     lv_obj_add_flag(path_lbl, LV_OBJ_FLAG_HIDDEN);
 
-    /* ======== remote file list (top) ======== */
+    /* ======== remote file list (top half) ======== */
     lv_obj_t *remote_header = lv_label_create(main_screen);
     lv_label_set_text(remote_header, "Remote Files (server):");
     lv_obj_set_style_text_color(remote_header, lv_color_hex(0x00d2ff), 0);
     lv_obj_align(remote_header, LV_ALIGN_TOP_LEFT, 10, 32);
 
     lv_obj_t *remote_cont = lv_obj_create(main_screen);
-    lv_obj_set_size(remote_cont, LV_PCT(96), 240);
+    lv_obj_set_size(remote_cont, LV_PCT(96), 200);
     lv_obj_align(remote_cont, LV_ALIGN_TOP_MID, 0, 54);
     lv_obj_set_style_bg_color(remote_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(remote_cont, lv_color_hex(0x334466), 0);
@@ -326,15 +326,15 @@ void ui_main_init(void)
     lv_obj_set_style_border_width(main_file_list, 0, 0);
     lv_list_add_text(main_file_list, "Click Refresh");
 
-    /* ======== local file list (bottom) ======== */
+    /* ======== local file list (bottom half, same size) ======== */
     lv_obj_t *local_header = lv_label_create(main_screen);
-    lv_label_set_text(local_header, "Local Files (downloaded):");
+    lv_label_set_text(local_header, "Local Files (client):");
     lv_obj_set_style_text_color(local_header, lv_color_hex(0x00d2ff), 0);
-    lv_obj_align(local_header, LV_ALIGN_TOP_LEFT, 10, 298);
+    lv_obj_align(local_header, LV_ALIGN_TOP_LEFT, 10, 258);
 
     lv_obj_t *local_cont = lv_obj_create(main_screen);
-    lv_obj_set_size(local_cont, LV_PCT(96), 130);
-    lv_obj_align(local_cont, LV_ALIGN_TOP_MID, 0, 320);
+    lv_obj_set_size(local_cont, LV_PCT(96), 200);
+    lv_obj_align(local_cont, LV_ALIGN_TOP_MID, 0, 280);
     lv_obj_set_style_bg_color(local_cont, lv_color_hex(0x1a1a3e), 0);
     lv_obj_set_style_border_color(local_cont, lv_color_hex(0x334466), 0);
     lv_obj_set_style_radius(local_cont, 6, 0);
@@ -411,156 +411,119 @@ void ui_show_progress_batch(void)
     lv_obj_t *parent = lv_layer_top();
     if (!parent) return;
 
-    if (batch_prog_panel) return; /* already showing */
+    /* don't duplicate */
+    if (batch_prog_panel || prog_panel) return;
 
     memset(prog_slots, 0, sizeof(prog_slots));
     batch_prog_count = 0;
 
     batch_prog_panel = lv_obj_create(parent);
-    lv_obj_set_size(batch_prog_panel, 380, 320);
+    lv_obj_set_size(batch_prog_panel, 320, 140);
     lv_obj_center(batch_prog_panel);
     lv_obj_set_style_bg_color(batch_prog_panel, lv_color_hex(0x222244), 0);
-    lv_obj_set_style_border_color(batch_prog_panel, lv_color_hex(0x4488cc), 0);
+    lv_obj_set_style_border_color(batch_prog_panel, lv_color_hex(0xCC0000), 0);
     lv_obj_set_style_border_width(batch_prog_panel, 2, 0);
-    lv_obj_set_style_radius(batch_prog_panel, 10, 0);
-    lv_obj_set_style_pad_all(batch_prog_panel, 8, 0);
-    lv_obj_set_scrollbar_mode(batch_prog_panel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_set_style_radius(batch_prog_panel, 8, 0);
+    lv_obj_set_style_pad_all(batch_prog_panel, 10, 0);
 
-    lv_obj_t *title = lv_label_create(batch_prog_panel);
-    lv_label_set_text(title, "Transfer Progress");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xffffff), 0);
-    lv_obj_set_style_text_font(title, &lv_font_montserrat_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+    /* title label (changed dynamically) */
+    prog_slots[0].label = lv_label_create(batch_prog_panel);
+    lv_label_set_text(prog_slots[0].label, "Transfer...");
+    lv_obj_set_style_text_color(prog_slots[0].label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(prog_slots[0].label, &lv_font_montserrat_16, 0);
+    lv_obj_align(prog_slots[0].label, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    lv_obj_t *cancel_btn = lv_button_create(batch_prog_panel);
-    lv_obj_set_size(cancel_btn, 80, 26);
-    lv_obj_align(cancel_btn, LV_ALIGN_TOP_LEFT, 4, 4);
-    lv_obj_t *cbl2 = lv_label_create(cancel_btn);
-    lv_label_set_text(cbl2, "Cancel All");
-    lv_obj_center(cbl2);
-    lv_obj_add_event_cb(cancel_btn, on_cancel_btn_clicked, LV_EVENT_CLICKED, NULL);
+    /* RED progress bar */
+    prog_slots[0].bar = lv_bar_create(batch_prog_panel);
+    lv_obj_set_size(prog_slots[0].bar, 280, 28);
+    lv_obj_align(prog_slots[0].bar, LV_ALIGN_CENTER, 0, 8);
+    lv_bar_set_range(prog_slots[0].bar, 0, 100);
+    lv_bar_set_value(prog_slots[0].bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR);
+    lv_obj_set_style_radius(prog_slots[0].bar, 4, 0);
+    lv_obj_set_style_anim_time(prog_slots[0].bar, 100, 0);
 
+    /* info label (size/percentage) */
+    prog_slots[0].label = lv_label_create(batch_prog_panel);  /* reuse slot label pointer for info */
+    lv_label_set_text(prog_slots[0].bar, "0%");  /* placeholder, won't work on bar */
+    lv_obj_set_style_text_color(batch_prog_panel, lv_color_hex(0xAAAAAA), 0);
+
+    /* actual info below bar */
+    lv_obj_t *info = lv_label_create(batch_prog_panel);
+    lv_label_set_text(info, "0 B / 0 B");
+    lv_obj_set_style_text_color(info, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -4);
+    /* stash info in slot for updates */
+    prog_slots[1].label = info;
+
+    /* Close button */
     lv_obj_t *close_btn = lv_button_create(batch_prog_panel);
     lv_obj_set_size(close_btn, 70, 26);
-    lv_obj_align(close_btn, LV_ALIGN_TOP_RIGHT, -4, 4);
+    lv_obj_align(close_btn, LV_ALIGN_BOTTOM_LEFT, 0, -4);
     lv_obj_t *cbl = lv_label_create(close_btn);
     lv_label_set_text(cbl, "Close");
     lv_obj_center(cbl);
     lv_obj_add_event_cb(close_btn, on_close_progress_btn_clicked, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *cont = lv_obj_create(batch_prog_panel);
-    lv_obj_set_size(cont, LV_PCT(100), 250);
-    lv_obj_align(cont, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_opa(cont, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(cont, 0, 0);
-    lv_obj_set_flex_flow(cont, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(cont, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
-                          LV_FLEX_ALIGN_START);
-    lv_obj_set_scrollbar_mode(cont, LV_SCROLLBAR_MODE_AUTO);
+    /* Cancel button */
+    lv_obj_t *cancel_btn = lv_button_create(batch_prog_panel);
+    lv_obj_set_size(cancel_btn, 80, 26);
+    lv_obj_align(cancel_btn, LV_ALIGN_BOTTOM_RIGHT, 0, -4);
+    lv_obj_t *cbl2 = lv_label_create(cancel_btn);
+    lv_label_set_text(cbl2, "Cancel");
+    lv_obj_center(cbl2);
+    lv_obj_add_event_cb(cancel_btn, on_cancel_btn_clicked, LV_EVENT_CLICKED, NULL);
 
-    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
-        lv_obj_t *slot = lv_obj_create(cont);
-        lv_obj_set_size(slot, LV_PCT(95), 40);
-        lv_obj_set_style_bg_opa(slot, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(slot, 0, 0);
-        lv_obj_set_style_pad_all(slot, 0, 0);
-        lv_obj_add_flag(slot, LV_OBJ_FLAG_HIDDEN);
-
-        prog_slots[i].label = lv_label_create(slot);
-        lv_label_set_text(prog_slots[i].label, "");
-        lv_obj_set_style_text_color(prog_slots[i].label, lv_color_hex(0xcccccc), 0);
-        lv_obj_align(prog_slots[i].label, LV_ALIGN_TOP_LEFT, 0, 0);
-
-        prog_slots[i].bar = lv_bar_create(slot);
-        lv_obj_set_size(prog_slots[i].bar, LV_PCT(100), 14);
-        lv_obj_align(prog_slots[i].bar, LV_ALIGN_BOTTOM_MID, 0, 0);
-        lv_bar_set_range(prog_slots[i].bar, 0, 100);
-    }
+    batch_prog_count = 0;
 }
 
 void ui_update_transfer_progress(const char *filename, int percent,
                                   int current_bytes, int total_bytes,
                                   bool is_upload)
 {
-    if (!batch_prog_panel) {
-        ui_show_progress_batch();
-        if (!batch_prog_panel) return;
+    /* If single popup exists, update that instead */
+    if (prog_panel) {
+        ui_update_progress(percent, current_bytes, total_bytes, filename, is_upload);
+        return;
     }
 
-    int slot_idx = -1;
-    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
-        if (prog_slots[i].active &&
-            strcmp(prog_slots[i].filename, filename) == 0 &&
-            prog_slots[i].is_upload == is_upload) {
-            slot_idx = i;
-            break;
-        }
+    if (!batch_prog_panel) return;
+
+    /* update title */
+    char title[300];
+    snprintf(title, sizeof(title), "%s: %s %d%%",
+             is_upload ? "Uploading" : "Downloading", filename, percent);
+    lv_label_set_text(prog_slots[0].label, title);
+
+    /* update bar */
+    lv_bar_set_value(prog_slots[0].bar, percent, LV_ANIM_ON);
+
+    /* update info */
+    lv_obj_t *info = prog_slots[1].label;
+    if (info) {
+        char buf[128];
+        if (total_bytes >= 1048576)
+            snprintf(buf, sizeof(buf), "%.1f / %.1f MB",
+                     current_bytes / 1048576.0f, total_bytes / 1048576.0f);
+        else if (total_bytes >= 1024)
+            snprintf(buf, sizeof(buf), "%.1f / %.1f KB",
+                     current_bytes / 1024.0f, total_bytes / 1024.0f);
+        else
+            snprintf(buf, sizeof(buf), "%d / %d B", current_bytes, total_bytes);
+        lv_label_set_text(info, buf);
     }
-
-    if (slot_idx < 0) {
-        for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
-            if (!prog_slots[i].active && !prog_slots[i].done) {
-                slot_idx = i;
-                break;
-            }
-        }
-    }
-
-    if (slot_idx < 0 || slot_idx >= MAX_PROGRESS_BARS) return;
-
-    if (!prog_slots[slot_idx].active) {
-        prog_slots[slot_idx].active = true;
-        strncpy(prog_slots[slot_idx].filename, filename,
-                sizeof(prog_slots[slot_idx].filename) - 1);
-        prog_slots[slot_idx].is_upload = is_upload;
-        batch_prog_count++;
-
-        lv_obj_t *cont = lv_obj_get_child(batch_prog_panel, 3);
-        if (cont) {
-            lv_obj_t *slot_obj = lv_obj_get_child(cont, (uint32_t)slot_idx);
-            if (slot_obj) lv_obj_clear_flag(slot_obj, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
-
-    lv_bar_set_value(prog_slots[slot_idx].bar, percent, LV_ANIM_ON);
-
-    char buf[256];
-    char sz[32];
-    if (total_bytes >= 1048576)
-        snprintf(sz, sizeof(sz), "%.1f/%.1f MB", current_bytes/1048576.0f, total_bytes/1048576.0f);
-    else if (total_bytes >= 1024)
-        snprintf(sz, sizeof(sz), "%.1f/%.1f KB", current_bytes/1024.0f, total_bytes/1024.0f);
-    else
-        snprintf(sz, sizeof(sz), "%d/%d B", current_bytes, total_bytes);
-
-    snprintf(buf, sizeof(buf), "[%s] %s  %d%%  %s",
-             is_upload ? "UP" : "DL", filename, percent, sz);
-    lv_label_set_text(prog_slots[slot_idx].label, buf);
-
-    ui_update_progress(percent, current_bytes, total_bytes, filename, is_upload);
 }
 
 void ui_on_transfer_done(const char *filename, bool success, bool is_upload)
 {
-    if (!batch_prog_panel) return;
-
-    for (int i = 0; i < MAX_PROGRESS_BARS; i++) {
-        if (prog_slots[i].active &&
-            strcmp(prog_slots[i].filename, filename) == 0 &&
-            prog_slots[i].is_upload == is_upload) {
-            prog_slots[i].active = false;
-            prog_slots[i].done = true;
-            batch_prog_count--;
-
-            char buf[256];
-            snprintf(buf, sizeof(buf), "[%s] %s - %s",
-                     is_upload ? "UP" : "DL", filename,
-                     success ? "OK" : "FAILED");
-            lv_label_set_text(prog_slots[i].label, buf);
-            lv_obj_set_style_text_color(prog_slots[i].label,
-                success ? lv_color_hex(0x88ff88) : lv_color_hex(0xff4444), 0);
-            break;
-        }
+    /* just update title to show result, leave panel open briefly */
+    if (batch_prog_panel && prog_slots[0].label) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "[%s] %s - %s",
+                 is_upload ? "UP" : "DL", filename,
+                 success ? "OK" : "FAILED");
+        lv_label_set_text(prog_slots[0].label, buf);
     }
 }
 
@@ -933,6 +896,12 @@ void ui_update_file_list_cb(void *data)
         while (tlen > 0 && (token[tlen-1] == '\r' || token[tlen-1] == ' '))
             token[--tlen] = '\0';
         if (tlen == 0) { token = strtok_r(NULL, "\n", &save); continue; }
+
+        /* skip "." and ".." entries from server directory listing */
+        if (strcmp(token, ".") == 0 || strcmp(token, "..") == 0) {
+            token = strtok_r(NULL, "\n", &save);
+            continue;
+        }
 
         lv_obj_t *btn = lv_list_add_button(main_file_list, NULL, token);
         lv_obj_add_event_cb(btn, on_file_item_clicked, LV_EVENT_CLICKED,

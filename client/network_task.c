@@ -481,12 +481,14 @@ static void start_download(const char *filename, int filesize)
     g_state = ST_DOWNLOADING;
 
     /* show progress dialog 鈥?must go through async call (UI thread safety) */
-    show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
-    if (spd) {
-        strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
-        spd->filename[sizeof(spd->filename) - 1] = '\0';
-        spd->is_upload = false;
-        lv_async_call(cb_show_progress, spd);
+    if (!g_batch_active) {
+        show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
+        if (spd) {
+            strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
+            spd->filename[sizeof(spd->filename) - 1] = '\0';
+            spd->is_upload = false;
+            lv_async_call(cb_show_progress, spd);
+        }
     }
 }
 
@@ -576,12 +578,14 @@ static void start_upload(const char *filename)
     g_state = ST_UPLOADING;
 
     /* show progress dialog 鈥?must go through async call (UI thread safety) */
-    show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
-    if (spd) {
-        strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
-        spd->filename[sizeof(spd->filename) - 1] = '\0';
-        spd->is_upload = true;
-        lv_async_call(cb_show_progress, spd);
+    if (!g_batch_active) {
+        show_progress_data_t *spd = (show_progress_data_t *)malloc(sizeof(show_progress_data_t));
+        if (spd) {
+            strncpy(spd->filename, filename, sizeof(spd->filename) - 1);
+            spd->filename[sizeof(spd->filename) - 1] = '\0';
+            spd->is_upload = true;
+            lv_async_call(cb_show_progress, spd);
+        }
     }
 }
 
@@ -816,7 +820,8 @@ void *network_thread_func(void *arg)
 
         /* poll with timeout so we can check g_network_running */
         struct pollfd pfd = { .fd = g_sockfd, .events = POLLIN };
-        int pr = poll(&pfd, 1, 500);
+        int polltime = (g_state == ST_IDLE && g_tx_queue.count > 0) ? 0 : 500;
+        int pr = poll(&pfd, 1, polltime);
         if (pr < 0) break;
         if (pr == 0) continue;           /* timeout, re-check flag */
 
@@ -1012,18 +1017,13 @@ bool network_cmd_get_multi(const char **filenames, int count)
             actual++;
     }
 
-    if (actual == 0) return false;
-
-    /* start first transfer */
-    transfer_task_t first;
-    if (tx_queue_pop(&g_tx_queue, &first)) {
+    if (actual > 0) {
         g_batch_total  = actual;
         g_batch_done   = 0;
         g_batch_active = true;
-        printf("[DEBUG] get_multi: starting batch of %d files, first=%s\n", actual, first.filename);
-        network_cmd_get(first.filename);
+        printf("[DEBUG] get_multi: enqueued %d files\n", actual);
     }
-    return true;
+    return actual > 0;
 }
 
 bool network_cmd_put_multi(const char **filenames, int count)
@@ -1052,18 +1052,13 @@ bool network_cmd_put_multi(const char **filenames, int count)
         valid_count++;
     }
 
-    if (valid_count == 0) return false;
-
-    /* start first transfer */
-    transfer_task_t first;
-    if (tx_queue_pop(&g_tx_queue, &first)) {
+    if (valid_count > 0) {
         g_batch_total  = valid_count;
         g_batch_done   = 0;
         g_batch_active = true;
-        printf("[DEBUG] put_multi: starting batch of %d files, first=%s\n", valid_count, first.filename);
-        network_cmd_put(first.filename);
+        printf("[DEBUG] put_multi: enqueued %d files\n", valid_count);
     }
-    return true;
+    return valid_count > 0;
 }
 
 void network_cancel_transfer(void)
