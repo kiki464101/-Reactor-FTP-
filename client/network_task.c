@@ -1,4 +1,4 @@
-﻿#define _GNU_SOURCE
+#define _GNU_SOURCE
 /**
  * @file network_task.c
  * @brief Network thread for LVGL FTP client
@@ -67,7 +67,16 @@ volatile int      g_active_transfers = 0;
 /*  Internal download state                                           */
 /* ------------------------------------------------------------------ */
 #define CHUNK_SIZE 4096
-#define CHUNK_DELAY_US 200000   /* 100ms delay per chunk for visible progress bar */
+#define CHUNK_DELAY_US 100000   /* 100ms delay per chunk for visible progress bar */
+
+/* Check if a file exists under a given directory */
+static bool check_file_exists(const char *dir, const char *filename)
+{
+    char path[520];
+    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    struct stat st;
+    return (stat(path, &st) == 0);
+}
 
 typedef enum {
     ST_IDLE,
@@ -320,6 +329,15 @@ static void tx_queue_reset(transfer_queue_t *q)
     pthread_mutex_unlock(&q->mutex);
 }
 
+/* 检查指定目录下是否存在同名文件 */
+static bool check_file_exists(const char *dir, const char *filename)
+{
+    char path[520];
+    snprintf(path, sizeof(path), "%s/%s", dir, filename);
+    struct stat st;
+    return (stat(path, &st) == 0);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Async-callback wrappers sent to UI thread                         */
 /* ------------------------------------------------------------------ */
@@ -491,6 +509,14 @@ static void start_download(const char *filename, int filesize)
     g_dl_received = 0;
     g_last_progress = -1;
     g_active_transfers++;
+
+    /* check local client/load/ for duplicate */
+    if (check_file_exists("./client/load", filename)) {
+        str_data_t *err = make_str_data("file have exist");
+        if (err) lv_async_call(cb_show_error_popup, err);
+        g_state = ST_IDLE;
+        return;
+    }
 
     /* create / truncate local file in client/load/ */
     mkdir("./client/load", 0755);
@@ -1068,6 +1094,13 @@ bool network_cmd_put(const char *filename)
     const char *base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
 
+    /* check server copy/ for duplicate */
+    if (check_file_exists("./copy", base)) {
+        str_data_t *err = make_str_data("file have exist");
+        if (err) lv_async_call(cb_show_error_popup, err);
+        return false;
+    }
+
     int len;
     unsigned char *pkt = build_cmd_put(base, filesize, &len);
     if (!pkt) return false;
@@ -1130,6 +1163,18 @@ bool network_cmd_put_multi(const char **filenames, int count)
         }
         /* skip directories — only upload regular files */
         if (!S_ISREG(st.st_mode)) continue;
+
+        /* check server copy/ for duplicate */
+        {
+            const char *base = strrchr(filenames[i], '/');
+            base = base ? base + 1 : filenames[i];
+            if (check_file_exists("./copy", base)) {
+                str_data_t *err = make_str_data("file have exist");
+                if (err) lv_async_call(cb_show_error_popup, err);
+                continue;
+            }
+        }
+
         transfer_task_t task;
         memset(&task, 0, sizeof(task));
         strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
