@@ -739,6 +739,7 @@ static void on_refresh_btn_clicked(lv_event_t *e)
 {
     (void)e;
     ui_set_status("Refreshing...");
+    g_local_cur_path[0] = '\0';  /* reset to top-level */
     network_cmd_ls();
     ui_refresh_local_files();
     /* immediately restore status bar */
@@ -785,9 +786,16 @@ static void on_upload_btn_clicked(lv_event_t *e)
         return;
     }
 
+    char full_names[MAX_SELECTED_FILES][256];
     const char *files[MAX_SELECTED_FILES];
-    for (int i = 0; i < g_local_sel_count; i++)
-        files[i] = g_selected_local[i];
+    for (int i = 0; i < g_local_sel_count; i++) {
+        if (g_local_cur_path[0])
+            snprintf(full_names[i], sizeof(full_names[i]),
+                     "%s/%s", g_local_cur_path, g_selected_local[i]);
+        else
+            strncpy(full_names[i], g_selected_local[i], sizeof(full_names[i]) - 1);
+        files[i] = full_names[i];
+    }
 
     ui_set_status("Uploading...");
     ui_show_progress_batch(); /* show popup synchronously on UI thread */
@@ -943,29 +951,48 @@ void ui_update_file_list_cb(void *data)
 /*  Local file helpers                                                 */
 /* ================================================================== */
 
-static char *scan_local_directory(void)
+static char g_local_cur_path[256] = {0};  /* subpath relative to ./client/ */
+
+static char *scan_local_directory(const char *subpath)
 {
     char *buf = (char *)malloc(SIZE);
     if (!buf) return NULL;
     int off = 0;
     buf[0] = '\0';
 
-DIR *dir = opendir(".");
+    char full[520];
+    if (subpath && subpath[0])
+        snprintf(full, sizeof(full), "./client/%s", subpath);
+    else
+        snprintf(full, sizeof(full), "./client");
+
+    DIR *dir = opendir(full);
     if (!dir) {
-        strncpy(buf, "(cannot open client dir)", SIZE - 1);
+        snprintf(buf, SIZE - 1, "(cannot open: %s)", full);
         return buf;
     }
+
+    /* ".." entry if inside a subdirectory */
+    if (subpath && subpath[0])
+        off += snprintf(buf + off, (size_t)(SIZE - off - 1), "..\n");
 
     struct dirent *d;
     while ((d = readdir(dir)) != NULL) {
         if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
             continue;
-        /* skip directories */
+
+        char item_path[560];
+        snprintf(item_path, sizeof(item_path), "%s/%s", full, d->d_name);
         struct stat st;
-        if (stat(d->d_name, &st) == 0 && S_ISDIR(st.st_mode))
-            continue;
-        off += snprintf(buf + off, (size_t)(SIZE - off - 1),
-                        "%s\n", d->d_name);
+        if (stat(item_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            /* directory: show with "/" suffix */
+            off += snprintf(buf + off, (size_t)(SIZE - off - 1),
+                            "%s/\n", d->d_name);
+        } else {
+            /* file: show normally */
+            off += snprintf(buf + off, (size_t)(SIZE - off - 1),
+                            "%s\n", d->d_name);
+        }
     }
     closedir(dir);
     return buf;
@@ -973,7 +1000,7 @@ DIR *dir = opendir(".");
 
 void ui_refresh_local_files(void)
 {
-    char *filelist = scan_local_directory();
+    char *filelist = scan_local_directory(g_local_cur_path);
     if (filelist)
         lv_async_call(ui_update_local_file_list_cb, filelist);
 }
@@ -984,6 +1011,14 @@ void ui_update_local_file_list_cb(void *data)
     if (!main_local_list) { free(filelist); return; }
 
     lv_obj_clean(main_local_list);
+
+    /* show current path in a header text */
+    {
+        char header[320];
+        snprintf(header, sizeof(header), "Local: ./client/%s",
+                 g_local_cur_path[0] ? g_local_cur_path : "");
+        lv_list_add_text(main_local_list, header);
+    }
 
     if (!filelist || strlen(filelist) == 0) {
         lv_list_add_text(main_local_list, "(empty directory)");
@@ -1022,7 +1057,35 @@ static void on_local_file_item_clicked(lv_event_t *e)
     const char *text = lv_list_get_button_text(main_local_list, btn);
     if (!text) return;
 
-    /* check if already selected (toggle off) */
+    size_t tlen = strlen(text);
+
+    /* ".." entry: navigate to parent directory */
+    if (strcmp(text, "..") == 0) {
+        char *slash = strrchr(g_local_cur_path, '/');
+        if (slash) *slash = '\0';
+        else g_local_cur_path[0] = '\0';
+        ui_refresh_local_files();
+        return;
+    }
+
+    /* directory (ends with "/"): navigate into it */
+    if (tlen > 0 && text[tlen - 1] == '/') {
+        char dirname[256];
+        strncpy(dirname, text, sizeof(dirname) - 1);
+        dirname[sizeof(dirname) - 1] = '\0';
+        if (tlen < sizeof(dirname)) dirname[tlen - 1] = '\0'; /* strip trailing / */
+
+        if (g_local_cur_path[0])
+            snprintf(g_local_cur_path, sizeof(g_local_cur_path),
+                     "%s/%s", g_local_cur_path, dirname);
+        else
+            strncpy(g_local_cur_path, dirname, sizeof(g_local_cur_path) - 1);
+
+        ui_refresh_local_files();
+        return;
+    }
+
+    /* regular file: toggle selection */
     for (int i = 0; i < g_local_sel_count; i++) {
         if (strcmp(g_selected_local[i], text) == 0) {
             lv_obj_remove_style(btn, &style_selected_local, 0);
