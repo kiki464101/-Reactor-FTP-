@@ -617,7 +617,6 @@ void ui_show_progress(const char *filename, bool is_upload)
     lv_obj_center(cbl);
     lv_obj_add_event_cb(cancel_btn, on_cancel_btn_clicked, LV_EVENT_CLICKED, NULL);
 
-    g_transferring = true;
 }
 
 void ui_hide_progress(void)
@@ -949,9 +948,9 @@ static char *scan_local_directory(void)
     int off = 0;
     buf[0] = '\0';
 
-    DIR *dir = opendir(".");
+    DIR *dir = opendir("./client");
     if (!dir) {
-        strncpy(buf, "(cannot open cwd)", SIZE - 1);
+        strncpy(buf, "(cannot open client dir)", SIZE - 1);
         return buf;
     }
 

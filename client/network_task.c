@@ -568,9 +568,9 @@ static void do_download_task(const transfer_task_t *task)
     int filesize = get_le32(resp.res_data);
     free(rsp);
 
-    mkdir("./load", 0755);
+    mkdir("./client/load", 0755);
     char path[520];
-    snprintf(path, sizeof(path), "./load/%s", task->filename);
+    snprintf(path, sizeof(path), "./client/load/%s", task->filename);
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (fd < 0) {
         close(sock);
@@ -615,14 +615,17 @@ static void do_download_task(const transfer_task_t *task)
 
 static void do_upload_task(const transfer_task_t *task)
 {
+    char local_path[520];
+    snprintf(local_path, sizeof(local_path), "./client/%s", task->filename);
+
     struct stat st;
-    if (stat(task->filename, &st) != 0) {
+    if (stat(local_path, &st) != 0) {
         report_tx_complete(task->filename, false, true);
         return;
     }
     int filesize = (int)st.st_size;
 
-    int local_fd = open(task->filename, O_RDONLY);
+    int local_fd = open(local_path, O_RDONLY);
     if (local_fd < 0) {
         report_tx_complete(task->filename, false, true);
         return;
@@ -1268,7 +1271,9 @@ bool network_cmd_put_multi(const char **filenames, int count)
 
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
-        if (stat(filenames[i], &st) != 0) {
+        char fpath[520];
+        snprintf(fpath, sizeof(fpath), "./client/%s", filenames[i]);
+        if (stat(fpath, &st) != 0) {
             str_data_t *err = make_str_data("file unexist");
             if (err) lv_async_call(cb_show_error_popup, err);
             continue;
