@@ -387,7 +387,7 @@ void ui_switch_to_main(void)
     if (!main_screen) ui_main_init();
 
     /* update status bar */
-    char sb[128];
+    char sb[256];
     snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
              g_login_user[0] ? g_login_user : "admin",
              g_session_info[0] ? g_session_info : "N/A");
@@ -743,7 +743,7 @@ static void on_refresh_btn_clicked(lv_event_t *e)
     ui_refresh_local_files();
     /* immediately restore status bar */
     if (g_login_ok) {
-        char sb[128];
+        char sb[256];
         snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
                  g_login_user[0] ? g_login_user : "admin",
                  g_session_info[0] ? g_session_info : "N/A");
@@ -1058,7 +1058,7 @@ static void restore_status_timer_cb(lv_timer_t *t)
 {
     lv_timer_del(t);
     if (g_login_ok) {
-        char sb[128];
+        char sb[256];
         snprintf(sb, sizeof(sb), "User: %s  |  %s  |  Connected",
                  g_login_user[0] ? g_login_user : "admin",
                  g_session_info[0] ? g_session_info : "N/A");
