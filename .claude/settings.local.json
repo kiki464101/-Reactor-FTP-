@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(bash \"C:/Users/HP/.claude/plugins/cache/superpowers-marketplace/superpowers/6.1.1/skills/subagent-driven-development/scripts/task-brief\" \"docs/superpowers/plans/2026-07-10-file-transfer-redesign.md\" 1)",
+      "Bash(gcc -fsyntax-only -Iclient -Ilvgl -x c client/network_task.h)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git commit -m 'feat: implement multi-threaded transfer with queue, pool, multi-select UI, batch progress *)",
+      "Bash(make)",
+      "Bash(gcc --version)",
+      "Bash(gcc *)",
+      "Bash(git commit -m 'fix: update file paths and remove stale g_transferring reference *)",
+      "Bash(git -C \"E:/share2.0/Ubantudemo\" status --short)",
+      "Bash(git -C \"E:/share2.0/Ubantudemo\" add client/network_task.c client/ui_manager.h client/ui_manager.c)",
+      "Bash(git -C \"E:/share2.0/Ubantudemo\" commit -m \"fix: update file paths and remove stale g_transferring reference\")",
+      "Bash(git -C \"E:/share2.0/Ubantudemo\" add client/ui_manager.c)",
+      "Bash(git -C \"E:/share2.0/Ubantudemo\" commit -m \"fix: increase status bar buffer 128→256 to fix format-truncation warning\")"
+    ]
+  }
+}
