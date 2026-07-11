@@ -356,6 +356,10 @@ static void cb_dl_progress(void *data)
     transfer_progress_t *p = (transfer_progress_t *)data;
     ui_update_progress(p->percent, p->current_bytes, p->total_bytes,
                        p->filename, p->is_upload);
+    /* also feed batch panel progress bars */
+    ui_update_transfer_progress(p->filename, p->percent,
+                                 p->current_bytes, p->total_bytes,
+                                 p->is_upload);
     free(p);
 }
 
@@ -390,9 +394,9 @@ static void cb_ul_done(void *data)
 }
 
 /* ---- Multi-file batch state ---- */
-static int           g_batch_count      = 0;   /* total files in batch */
-static int           g_batch_done       = 0;   /* files completed */
-static bool          g_batch_active     = false;
+static int           g_batch_total  = 0;   /* total files in batch */
+static int           g_batch_done   = 0;   /* files completed */
+static bool          g_batch_active = false;
 
 typedef struct {
     char filename[256];
@@ -413,24 +417,30 @@ static void cb_show_error_popup(void *data)
     if (d) { ui_show_error_popup(d->text); free(d); }
 }
 
-static void batch_on_file_done(bool success)
+/* Start the next queued transfer. Called from main loop when IDLE.
+ * Returns true if a transfer was started. */
+static bool batch_start_next(void)
 {
-    if (!g_batch_active) return;
-    g_batch_done++;
-    if (g_batch_done >= g_batch_count) {
-        /* all files done */
+    if (g_tx_queue.count == 0)
+        return false;
+
+    transfer_task_t task;
+    if (!tx_queue_pop(&g_tx_queue, &task))
+        return false;
+
+    if (task.is_upload)
+        return network_cmd_put(task.filename);
+    else
+        return network_cmd_get(task.filename);
+}
+
+/* Check if all batch transfers are complete */
+static void batch_check_complete(void)
+{
+    if (g_batch_active && g_tx_queue.count == 0 && g_state == ST_IDLE) {
         g_batch_active = false;
         str_data_t *msg = make_str_data("Transfer complete");
         if (msg) lv_async_call(cb_dl_done, msg);
-    } else {
-        /* start next file from queue */
-        transfer_task_t task;
-        if (tx_queue_pop(&g_tx_queue, &task)) {
-            if (task.is_upload)
-                network_cmd_put(task.filename);
-            else
-                network_cmd_get(task.filename);
-        }
     }
 }
 
@@ -483,7 +493,6 @@ static void start_download(const char *filename, int filesize)
 static void update_dl_progress(void)
 {
     int pct = (g_dl_total > 0) ? (g_dl_received * 100 / g_dl_total) : 0;
-    /* update every 2% increment (or at 100% final), avoid flooding async calls */
     if (pct - g_last_progress < 2 && pct < 100) return;
     g_last_progress = pct;
 
@@ -507,7 +516,10 @@ static void finish_download(bool success)
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
 
-    /* report progress to batch panel */
+    printf("[DEBUG] finish_download: %s success=%d batch=%d done=%d/%d queue=%d\n",
+           g_dl_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
+
+    /* per-file report to batch panel */
     {
         tx_done_data_t *d = (tx_done_data_t *)malloc(sizeof(*d));
         if (d) {
@@ -520,7 +532,8 @@ static void finish_download(bool success)
     }
 
     if (g_batch_active) {
-        batch_on_file_done(success);
+        g_batch_done++;
+        /* don't show "Downloaded" yet — batch_check_complete handles it */
     } else {
         str_data_t *msg = make_str_data(success
             ? "Downloaded"
@@ -599,10 +612,30 @@ static void finish_upload(bool success)
     g_transfer_progress.active = false;
     g_state = ST_IDLE;
 
-    str_data_t *msg = make_str_data(success
-        ? "Uploaded"
-        : "Upload failed");
-    if (msg) lv_async_call(cb_ul_done, msg);
+    printf("[DEBUG] finish_upload: %s success=%d batch=%d done=%d/%d queue=%d\n",
+           g_ul_filename, success, g_batch_active, g_batch_done, g_batch_total, g_tx_queue.count);
+
+    /* per-file report to batch panel */
+    {
+        tx_done_data_t *d = (tx_done_data_t *)malloc(sizeof(*d));
+        if (d) {
+            strncpy(d->filename, g_ul_filename, sizeof(d->filename) - 1);
+            d->filename[sizeof(d->filename) - 1] = '\0';
+            d->success   = success;
+            d->is_upload = true;
+            lv_async_call(cb_tx_done, d);
+        }
+    }
+
+    if (g_batch_active) {
+        g_batch_done++;
+        /* don't show "Uploaded" yet — batch_check_complete handles it */
+    } else {
+        str_data_t *msg = make_str_data(success
+            ? "Uploaded"
+            : "Upload failed");
+        if (msg) lv_async_call(cb_ul_done, msg);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -769,16 +802,16 @@ void *network_thread_func(void *arg)
         }
 
         /* ---- IDLE / waiting for a response packet ---- */
-        /* check transfer queue for pending multi-file tasks */
-        if (g_tx_queue.count > 0 && !g_tx_queue.cancelled) {
-            transfer_task_t task;
-            if (tx_queue_pop(&g_tx_queue, &task)) {
-                if (task.is_upload)
-                    network_cmd_put(task.filename);
-                else
-                    network_cmd_get(task.filename);
-                continue;
-            }
+        /* Only process queue when completely idle (not waiting for response) */
+        if (g_state == ST_IDLE && g_tx_queue.count > 0 && !g_tx_queue.cancelled) {
+            printf("[DEBUG] main loop: starting next queued transfer (queue=%d)\n", g_tx_queue.count);
+            batch_start_next();
+            continue;
+        }
+
+        /* Check batch completion */
+        if (g_state == ST_IDLE) {
+            batch_check_complete();
         }
 
         /* poll with timeout so we can check g_network_running */
@@ -967,22 +1000,27 @@ bool network_cmd_get_multi(const char **filenames, int count)
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
 
-    /* push all to queue */
+    /* push all to queue, count actual enqueued */
+    int actual = 0;
     for (int i = 0; i < count; i++) {
         if (!filenames[i] || strlen(filenames[i]) == 0) continue;
         transfer_task_t task;
         memset(&task, 0, sizeof(task));
         strncpy(task.filename, filenames[i], sizeof(task.filename) - 1);
         task.is_upload = false;
-        tx_queue_push(&g_tx_queue, &task);
+        if (tx_queue_push(&g_tx_queue, &task))
+            actual++;
     }
+
+    if (actual == 0) return false;
 
     /* start first transfer */
     transfer_task_t first;
     if (tx_queue_pop(&g_tx_queue, &first)) {
-        g_batch_count  = count;
+        g_batch_total  = actual;
         g_batch_done   = 0;
         g_batch_active = true;
+        printf("[DEBUG] get_multi: starting batch of %d files, first=%s\n", actual, first.filename);
         network_cmd_get(first.filename);
     }
     return true;
@@ -1002,7 +1040,6 @@ bool network_cmd_put_multi(const char **filenames, int count)
         char fpath[520];
         snprintf(fpath, sizeof(fpath), "./client/%s", filenames[i]);
         if (stat(fpath, &st) != 0) {
-            /* file doesn't exist - show error popup on UI thread */
             str_data_t *err = make_str_data("file unexist");
             if (err) lv_async_call(cb_show_error_popup, err);
             continue;
@@ -1020,9 +1057,10 @@ bool network_cmd_put_multi(const char **filenames, int count)
     /* start first transfer */
     transfer_task_t first;
     if (tx_queue_pop(&g_tx_queue, &first)) {
-        g_batch_count  = valid_count;
+        g_batch_total  = valid_count;
         g_batch_done   = 0;
         g_batch_active = true;
+        printf("[DEBUG] put_multi: starting batch of %d files, first=%s\n", valid_count, first.filename);
         network_cmd_put(first.filename);
     }
     return true;
