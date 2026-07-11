@@ -418,44 +418,37 @@ void ui_show_progress_batch(void)
     batch_prog_count = 0;
 
     batch_prog_panel = lv_obj_create(parent);
-    lv_obj_set_size(batch_prog_panel, 320, 140);
+    lv_obj_set_size(batch_prog_panel, 340, 160);
     lv_obj_center(batch_prog_panel);
-    lv_obj_set_style_bg_color(batch_prog_panel, lv_color_hex(0x222244), 0);
+    lv_obj_set_style_bg_color(batch_prog_panel, lv_color_hex(0x1a1a2e), 0);
     lv_obj_set_style_border_color(batch_prog_panel, lv_color_hex(0xCC0000), 0);
     lv_obj_set_style_border_width(batch_prog_panel, 2, 0);
-    lv_obj_set_style_radius(batch_prog_panel, 8, 0);
-    lv_obj_set_style_pad_all(batch_prog_panel, 10, 0);
+    lv_obj_set_style_radius(batch_prog_panel, 10, 0);
+    lv_obj_set_style_pad_all(batch_prog_panel, 12, 0);
 
-    /* title label (changed dynamically) */
+    /* title: filename + percentage */
     prog_slots[0].label = lv_label_create(batch_prog_panel);
-    lv_label_set_text(prog_slots[0].label, "Transfer...");
+    lv_label_set_text(prog_slots[0].label, "Preparing transfer...");
     lv_obj_set_style_text_color(prog_slots[0].label, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_font(prog_slots[0].label, &lv_font_montserrat_16, 0);
     lv_obj_align(prog_slots[0].label, LV_ALIGN_TOP_LEFT, 0, 0);
 
-    /* RED progress bar */
+    /* RED progress bar - tall and clearly visible */
     prog_slots[0].bar = lv_bar_create(batch_prog_panel);
-    lv_obj_set_size(prog_slots[0].bar, 280, 28);
-    lv_obj_align(prog_slots[0].bar, LV_ALIGN_CENTER, 0, 8);
+    lv_obj_set_size(prog_slots[0].bar, 300, 30);
+    lv_obj_align(prog_slots[0].bar, LV_ALIGN_CENTER, 0, 4);
     lv_bar_set_range(prog_slots[0].bar, 0, 100);
     lv_bar_set_value(prog_slots[0].bar, 0, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0x333355), 0);
+    lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0x331111), 0);
     lv_obj_set_style_bg_color(prog_slots[0].bar, lv_color_hex(0xCC0000), LV_PART_INDICATOR);
-    lv_obj_set_style_radius(prog_slots[0].bar, 4, 0);
+    lv_obj_set_style_radius(prog_slots[0].bar, 6, 0);
     lv_obj_set_style_anim_time(prog_slots[0].bar, 100, 0);
 
-    /* info label (size/percentage) */
-    prog_slots[0].label = lv_label_create(batch_prog_panel);  /* reuse slot label pointer for info */
-    lv_label_set_text(prog_slots[0].bar, "0%");  /* placeholder, won't work on bar */
-    lv_obj_set_style_text_color(batch_prog_panel, lv_color_hex(0xAAAAAA), 0);
-
-    /* actual info below bar */
-    lv_obj_t *info = lv_label_create(batch_prog_panel);
-    lv_label_set_text(info, "0 B / 0 B");
-    lv_obj_set_style_text_color(info, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(info, LV_ALIGN_BOTTOM_MID, 0, -4);
-    /* stash info in slot for updates */
-    prog_slots[1].label = info;
+    /* info: file size */
+    prog_slots[1].label = lv_label_create(batch_prog_panel);
+    lv_label_set_text(prog_slots[1].label, "0 B / 0 B");
+    lv_obj_set_style_text_color(prog_slots[1].label, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_align(prog_slots[1].label, LV_ALIGN_BOTTOM_MID, 0, -4);
 
     /* Close button */
     lv_obj_t *close_btn = lv_button_create(batch_prog_panel);
@@ -482,26 +475,23 @@ void ui_update_transfer_progress(const char *filename, int percent,
                                   int current_bytes, int total_bytes,
                                   bool is_upload)
 {
-    /* If single popup exists, update that instead */
-    if (prog_panel) {
-        ui_update_progress(percent, current_bytes, total_bytes, filename, is_upload);
-        return;
-    }
-
     if (!batch_prog_panel) return;
 
-    /* update title */
-    char title[300];
-    snprintf(title, sizeof(title), "%s: %s %d%%",
-             is_upload ? "Uploading" : "Downloading", filename, percent);
-    lv_label_set_text(prog_slots[0].label, title);
+    /* slot 0: title label */
+    if (prog_slots[0].label) {
+        char title[300];
+        snprintf(title, sizeof(title), "%s: %s  %d%%",
+                 is_upload ? "Uploading" : "Downloading", filename, percent);
+        lv_label_set_text(prog_slots[0].label, title);
+    }
 
-    /* update bar */
-    lv_bar_set_value(prog_slots[0].bar, percent, LV_ANIM_ON);
+    /* slot 0: bar */
+    if (prog_slots[0].bar) {
+        lv_bar_set_value(prog_slots[0].bar, percent, LV_ANIM_ON);
+    }
 
-    /* update info */
-    lv_obj_t *info = prog_slots[1].label;
-    if (info) {
+    /* slot 1: info label */
+    if (prog_slots[1].label) {
         char buf[128];
         if (total_bytes >= 1048576)
             snprintf(buf, sizeof(buf), "%.1f / %.1f MB",
@@ -511,19 +501,21 @@ void ui_update_transfer_progress(const char *filename, int percent,
                      current_bytes / 1024.0f, total_bytes / 1024.0f);
         else
             snprintf(buf, sizeof(buf), "%d / %d B", current_bytes, total_bytes);
-        lv_label_set_text(info, buf);
+        lv_label_set_text(prog_slots[1].label, buf);
     }
 }
 
 void ui_on_transfer_done(const char *filename, bool success, bool is_upload)
 {
-    /* just update title to show result, leave panel open briefly */
     if (batch_prog_panel && prog_slots[0].label) {
         char buf[256];
         snprintf(buf, sizeof(buf), "[%s] %s - %s",
                  is_upload ? "UP" : "DL", filename,
-                 success ? "OK" : "FAILED");
+                 success ? "DONE" : "FAILED");
         lv_label_set_text(prog_slots[0].label, buf);
+        lv_bar_set_value(prog_slots[0].bar, success ? 100 : 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(prog_slots[0].bar,
+            success ? lv_color_hex(0x00CC00) : lv_color_hex(0xFF0000), LV_PART_INDICATOR);
     }
 }
 
