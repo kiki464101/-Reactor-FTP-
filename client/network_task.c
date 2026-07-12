@@ -1042,6 +1042,7 @@ void *network_thread_func(void *arg)
                         raw[dlen] = '\0';
                         char *save;
                         char *token = strtok_r(raw, "\n", &save);
+                        int nfiles = 0;
                         while (token) {
                             if (token[0] != '\0') {
                                 transfer_task_t t;
@@ -1049,11 +1050,16 @@ void *network_thread_func(void *arg)
                                 strncpy(t.filename, token, sizeof(t.filename) - 1);
                                 t.is_upload = false;
                                 tx_queue_push(&g_tx_queue, &t);
-                                g_batch_total++;
+                                nfiles++;
                             }
                             token = strtok_r(NULL, "\n", &save);
                         }
                         free(raw);
+                        /* fix: folder task counted as 1 in g_batch_total,
+                         * replace with actual file count from LISTDIR */
+                        g_batch_total += nfiles - 1;
+                        fprintf(stderr, "[listdir resp] parsed %d files, batch_total=%d queue=%d\n",
+                                nfiles, g_batch_total, g_tx_queue.count);
                     }
                     g_state = ST_IDLE;
                 } else {

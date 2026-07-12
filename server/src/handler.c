@@ -256,7 +256,12 @@ static int listdir_recursive(const char *base_path, const char *rel_prefix,
         full_base[fb_len - 1] = '\0';
 
     DIR *dir = opendir(full_base[0] ? full_base : ".");
-    if (!dir) return -1;
+    if (!dir) {
+        fprintf(stderr, "[listdir] opendir '%s' failed: %s\n",
+                full_base[0] ? full_base : ".", strerror(errno));
+        return -1;
+    }
+    fprintf(stderr, "[listdir] scanning: %s\n", full_base);
 
     struct dirent *d;
     while ((d = readdir(dir)) != NULL) {
@@ -285,6 +290,7 @@ static int listdir_recursive(const char *base_path, const char *rel_prefix,
             int written = snprintf(buf + *off, (size_t)avail,
                                    "%s%s\n", rel_prefix, d->d_name);
             if (written < 0 || written >= avail) { closedir(dir); return -2; }
+            fprintf(stderr, "[listdir]   file: %s%s\n", rel_prefix, d->d_name);
             *off += written;
         }
     }
