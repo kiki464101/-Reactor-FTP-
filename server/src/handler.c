@@ -214,10 +214,13 @@ void worker_handle_ls(client_session_t *sess,
 
     DIR *dir = opendir(dir_to_list);
     if (!dir) {
+        fprintf(stderr, "[ls] opendir('%s') FAILED: errno=%d %s\n",
+                dir_to_list, errno, strerror(errno));
         tx(sess, FTP_CMD_LS, 0, (unsigned char *)"opendir fail", 12);
         shm_update_status(sess->shm, sess->fd, "Online");
         return;
     }
+    fprintf(stderr, "[ls] opendir('%s') OK\n", dir_to_list);
 
     struct dirent *d;
     while ((d = readdir(dir)) != NULL) {

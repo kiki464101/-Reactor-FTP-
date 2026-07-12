@@ -679,6 +679,13 @@ static void finish_download(bool success)
             : "Download failed");
         if (msg) lv_async_call(cb_dl_done, msg);
     }
+
+    /* consume the server's DONE packet so it doesn't pollute next response */
+    {
+        int dlen;
+        unsigned char *done = read_packet(g_sockfd, &dlen);
+        if (done) free(done);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -771,6 +778,13 @@ static void finish_upload(bool success)
             ? "Uploaded"
             : "Upload failed");
         if (msg) lv_async_call(cb_ul_done, msg);
+    }
+
+    /* consume the server's DONE packet so it doesn't pollute next response */
+    {
+        int dlen;
+        unsigned char *done = read_packet(g_sockfd, &dlen);
+        if (done) free(done);
     }
 }
 
@@ -1003,6 +1017,22 @@ void *network_thread_func(void *arg)
                 if (rsp2.cmd_no == FTP_CMD_GET && rsp2.res_result == 1) {
                     int filesize = get_le32(rsp2.res_data);
                     start_download(g_dl_filename, filesize);
+                } else if (rsp2.cmd_no == FTP_CMD_LS) {
+                    /* LS response arrived during download — route to LS handler */
+                    if (rsp2.res_result == 1) {
+                        int dlen = rsp2.res_len - 1;
+                        char *filelist = (char *)malloc((size_t)(dlen + 1));
+                        if (filelist) {
+                            memcpy(filelist, rsp2.res_data, (size_t)dlen);
+                            filelist[dlen] = '\0';
+                            lv_async_call(ui_update_file_list_cb, filelist);
+                        }
+                    } else {
+                        str_data_t *err = make_str_data("Server: dir not found");
+                        if (err) lv_async_call(cb_show_error_popup, err);
+                        lv_async_call(cb_refresh_remote_list, NULL);
+                    }
+                    /* don't change g_state — still waiting for GET response */
                 } else {
                     str_data_t *err = make_str_data("Server: file not found");
                     if (err) lv_async_call(cb_show_error_popup, err);
@@ -1022,6 +1052,18 @@ void *network_thread_func(void *arg)
                         if (err) lv_async_call(cb_show_error_popup, err);
                         g_state = ST_IDLE;
                     }
+                } else if (rsp2.cmd_no == FTP_CMD_LS) {
+                    /* LS response arrived during upload — route to LS handler */
+                    if (rsp2.res_result == 1) {
+                        int dlen = rsp2.res_len - 1;
+                        char *filelist = (char *)malloc((size_t)(dlen + 1));
+                        if (filelist) {
+                            memcpy(filelist, rsp2.res_data, (size_t)dlen);
+                            filelist[dlen] = '\0';
+                            lv_async_call(ui_update_file_list_cb, filelist);
+                        }
+                    }
+                    /* don't change g_state — still waiting for PUT response */
                 } else {
                     str_data_t *err = make_str_data("Server rejected upload");
                     if (err) lv_async_call(cb_show_error_popup, err);
@@ -1062,6 +1104,18 @@ void *network_thread_func(void *arg)
                                 nfiles, g_batch_total, g_tx_queue.count);
                     }
                     g_state = ST_IDLE;
+                } else if (rsp2.cmd_no == FTP_CMD_LS) {
+                    /* LS response arrived during LISTDIR — route to LS handler */
+                    if (rsp2.res_result == 1) {
+                        int dlen = rsp2.res_len - 1;
+                        char *filelist = (char *)malloc((size_t)(dlen + 1));
+                        if (filelist) {
+                            memcpy(filelist, rsp2.res_data, (size_t)dlen);
+                            filelist[dlen] = '\0';
+                            lv_async_call(ui_update_file_list_cb, filelist);
+                        }
+                    }
+                    /* don't change g_state — still waiting for LISTDIR response */
                 } else {
                     str_data_t *err = make_str_data("Server: listdir failed");
                     if (err) lv_async_call(cb_show_error_popup, err);
@@ -1082,6 +1136,11 @@ void *network_thread_func(void *arg)
                         filelist[dlen] = '\0';
                         lv_async_call(ui_update_file_list_cb, filelist);
                     }
+                } else {
+                    /* server opendir failed — tell user and roll back path */
+                    str_data_t *err = make_str_data("Server: dir not found");
+                    if (err) lv_async_call(cb_show_error_popup, err);
+                    lv_async_call(cb_refresh_remote_list, NULL);
                 }
                 break;
             case FTP_CMD_BYE:

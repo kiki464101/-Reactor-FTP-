@@ -11,6 +11,7 @@
 #include "network_task.h"
 #include <dirent.h>
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -99,7 +100,8 @@ static char g_remote_cur_path[256] = {0};
 static lv_obj_t *err_popup      = NULL;
 static lv_obj_t *err_label      = NULL;
 static lv_obj_t *confirm_popup = NULL;
-static bool        g_long_pressed = false;  /* suppress click after long-press */
+static bool        g_local_long_pressed  = false;  /* suppress local click after long-press */
+static bool        g_remote_long_pressed = false;  /* suppress remote click after long-press */
 
 /* ================================================================== */
 /*  Forward declarations of event handlers                            */
@@ -706,9 +708,9 @@ void ui_show_error(const char *msg)
 
 static void on_file_item_clicked(lv_event_t *e)
 {
-    /* if a long-press just happened, suppress navigation/selection */
-    if (g_long_pressed) {
-        g_long_pressed = false;
+    /* if a long-press just happened on remote, suppress navigation/selection */
+    if (g_remote_long_pressed) {
+        g_remote_long_pressed = false;
         return;
     }
 
@@ -736,12 +738,16 @@ static void on_file_item_clicked(lv_event_t *e)
         dirname[sizeof(dirname) - 1] = '\0';
         if (tlen < sizeof(dirname)) dirname[tlen - 1] = '\0';
 
-        if (g_remote_cur_path[0])
-            snprintf(g_remote_cur_path, sizeof(g_remote_cur_path),
-                     "%s/%s", g_remote_cur_path, dirname);
-        else
+        if (g_remote_cur_path[0]) {
+            char new_path[256];
+            snprintf(new_path, sizeof(new_path), "%s/%s",
+                     g_remote_cur_path, dirname);
+            strncpy(g_remote_cur_path, new_path, sizeof(g_remote_cur_path) - 1);
+        } else
             strncpy(g_remote_cur_path, dirname, sizeof(g_remote_cur_path) - 1);
 
+        fprintf(stderr, "[remote click] folder '%s' -> cur_path='%s'\n",
+                text, g_remote_cur_path);
         network_cmd_ls(g_remote_cur_path);
         return;
     }
@@ -1210,6 +1216,10 @@ static char *scan_local_directory(const char *subpath)
         snprintf(full, sizeof(full), "./client");
 
     DIR *dir = opendir(full);
+    fprintf(stderr, "[local] opendir('%s') = %p", full, (void *)dir);
+    if (!dir)
+        fprintf(stderr, "  [FAIL errno=%d: %s]", errno, strerror(errno));
+    fprintf(stderr, "\n");
     if (!dir) {
         free(buf);
         return NULL;
@@ -1358,6 +1368,7 @@ static void on_local_file_item_long_pressed(lv_event_t *e)
                         sizeof(g_selected_local[j]) - 1);
             }
             g_local_sel_count--;
+            g_local_long_pressed = true;  /* suppress CLICKED after long-press deselect */
             goto update_label;
         }
     }
@@ -1369,7 +1380,7 @@ static void on_local_file_item_long_pressed(lv_event_t *e)
     strncpy(g_selected_local[g_local_sel_count], full_path,
             sizeof(g_selected_local[g_local_sel_count]) - 1);
     g_local_sel_count++;
-    g_long_pressed = true;  /* suppress the pending CLICKED event */
+    g_local_long_pressed = true;  /* suppress the pending CLICKED event */
 
 update_label:
     if (main_selected_label) {
@@ -1414,6 +1425,7 @@ static void on_remote_file_item_long_pressed(lv_event_t *e)
                         sizeof(g_selected_remote[j]) - 1);
             }
             g_remote_sel_count--;
+            g_remote_long_pressed = true;  /* suppress CLICKED after long-press deselect */
             goto update_label;
         }
     }
@@ -1425,7 +1437,7 @@ static void on_remote_file_item_long_pressed(lv_event_t *e)
     strncpy(g_selected_remote[g_remote_sel_count], full_path,
             sizeof(g_selected_remote[g_remote_sel_count]) - 1);
     g_remote_sel_count++;
-    g_long_pressed = true;  /* suppress the pending CLICKED event */
+    g_remote_long_pressed = true;  /* suppress the pending CLICKED event */
 
 update_label:
     if (main_selected_label) {
@@ -1473,9 +1485,9 @@ bool ui_local_list_has_entry(const char *name)
 
 static void on_local_file_item_clicked(lv_event_t *e)
 {
-    /* if a long-press just happened, suppress navigation+selection */
-    if (g_long_pressed) {
-        g_long_pressed = false;
+    /* if a long-press just happened on local, suppress navigation+selection */
+    if (g_local_long_pressed) {
+        g_local_long_pressed = false;
         return;
     }
 
@@ -1503,12 +1515,16 @@ static void on_local_file_item_clicked(lv_event_t *e)
         dirname[sizeof(dirname) - 1] = '\0';
         if (tlen < sizeof(dirname)) dirname[tlen - 1] = '\0'; /* strip trailing / */
 
-        if (g_local_cur_path[0])
-            snprintf(g_local_cur_path, sizeof(g_local_cur_path),
-                     "%s/%s", g_local_cur_path, dirname);
-        else
+        if (g_local_cur_path[0]) {
+            char new_path[256];
+            snprintf(new_path, sizeof(new_path), "%s/%s",
+                     g_local_cur_path, dirname);
+            strncpy(g_local_cur_path, new_path, sizeof(g_local_cur_path) - 1);
+        } else
             strncpy(g_local_cur_path, dirname, sizeof(g_local_cur_path) - 1);
 
+        fprintf(stderr, "[local click] folder '%s' -> cur_path='%s'\n",
+                text, g_local_cur_path);
         ui_refresh_local_files();
         return;
     }
@@ -1531,6 +1547,7 @@ static void on_local_file_item_clicked(lv_event_t *e)
                         sizeof(g_selected_local[j]) - 1);
             }
             g_local_sel_count--;
+            g_local_long_pressed = true;  /* suppress CLICKED after long-press deselect */
             goto update_label;
         }
     }
