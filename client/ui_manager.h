@@ -68,6 +68,8 @@ void ui_show_error(const char *msg);
 void ui_update_file_list_cb(void *data);
 void ui_update_local_file_list_cb(void *data);
 void ui_refresh_local_files(void);
+void ui_refresh_local_files_root(void);
+void ui_refresh_remote_list_root(void);
 
 /* Query whether a file name is currently displayed in a list widget. */
 bool ui_remote_list_has_entry(const char *name);

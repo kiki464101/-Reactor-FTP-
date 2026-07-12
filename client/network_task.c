@@ -467,6 +467,12 @@ static void cb_show_progress(void *data)
     free(data);
 }
 
+static void cb_show_progress_batch(void *data)
+{
+    (void)data;
+    ui_show_progress_batch();
+}
+
 static void cb_ul_done(void *data)
 {
     str_data_t *d = (str_data_t *)data;
@@ -536,16 +542,37 @@ static bool batch_start_next(void)
         /* immediately try next in queue */
         return batch_start_next();
     }
+    /* show progress popup on first task */
+    if (g_batch_done == 0) {
+        lv_async_call(cb_show_progress_batch, NULL);
+    }
     return true;
 }
+static bool          g_batch_is_upload = false;  /* track direction for auto-refresh */
 
-/* Check if all batch transfers are complete */
+static void cb_refresh_local_list(void *data)
+{
+    (void)data;
+    ui_refresh_local_files_root();
+}
+
+static void cb_refresh_remote_list(void *data)
+{
+    (void)data;
+    ui_refresh_remote_list_root();
+}
+
 static void batch_check_complete(void)
 {
     if (g_batch_active && g_tx_queue.count == 0 && g_state == ST_IDLE) {
         g_batch_active = false;
         str_data_t *msg = make_str_data("Transfer complete");
         if (msg) lv_async_call(cb_dl_done, msg);
+        /* auto-refresh the appropriate file list */
+        if (g_batch_is_upload)
+            lv_async_call(cb_refresh_remote_list, NULL);
+        else
+            lv_async_call(cb_refresh_local_list, NULL);
     }
 }
 
@@ -564,16 +591,11 @@ static void start_download(const char *filename, int filesize)
     g_last_progress = -1;
     g_active_transfers++;
 
-    /* check local client/load/ for duplicate */
-    if (ui_local_list_has_entry(filename)) {
-        str_data_t *err = make_str_data("repeat file");
-        if (err) lv_async_call(cb_show_error_popup, err);
-        g_state = ST_IDLE;
-        return;
-    }
+    /* create / truncate local file — ALL downloads go to ./client/load/<filename> */
+    char dl_path[520];
+    snprintf(dl_path, sizeof(dl_path), "./client/load/%s", filename);
 
-    /* create / truncate local file in client/load/ */
-    /* if filename contains '/', create parent dirs first */
+    /* create parent directories via mkdir_p */
     {
         char dl_dir[520];
         snprintf(dl_dir, sizeof(dl_dir), "./client/load/%s", filename);
@@ -581,12 +603,8 @@ static void start_download(const char *filename, int filesize)
         if (slash) {
             *slash = '\0';
             mkdir_p(dl_dir);
-            *slash = '/';
         }
     }
-    mkdir("./client/load", 0755);
-    char dl_path[520];
-    snprintf(dl_path, sizeof(dl_path), "./client/load/%s", filename);
     g_dl_fd = open(dl_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (g_dl_fd < 0) {
         str_data_t *err = make_str_data("Failed to create local file");
@@ -1228,7 +1246,7 @@ bool network_cmd_put(const char *filename)
     }
 
     int len;
-    unsigned char *pkt = build_cmd_put(base, filesize, &len);
+    unsigned char *pkt = build_cmd_put(filename, filesize, &len);
     if (!pkt) return false;
     write(g_sockfd, pkt, (size_t)len);
     free(pkt);
@@ -1241,6 +1259,13 @@ bool network_cmd_get_multi(const char **filenames, int count)
 {
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
+
+    /* prevent reentrant calls while a batch is in progress */
+    if (g_batch_active && g_tx_queue.count > 0) {
+        str_data_t *err = make_str_data("transfer in progress");
+        if (err) lv_async_call(cb_show_error_popup, err);
+        return false;
+    }
 
     /* reset cancelled flag so queue is usable after a prior cancel */
     tx_queue_reset(&g_tx_queue);
@@ -1282,6 +1307,7 @@ bool network_cmd_get_multi(const char **filenames, int count)
         g_batch_total  = actual;
         g_batch_done   = 0;
         g_batch_active = true;
+        g_batch_is_upload = false;
         printf("[DEBUG] get_multi: enqueued %d files\n", actual);
     }
     return actual > 0;
@@ -1291,6 +1317,13 @@ bool network_cmd_put_multi(const char **filenames, int count)
 {
     if (!g_network_running || !filenames || count <= 0) return false;
     if (count > MAX_SELECTED_FILES) count = MAX_SELECTED_FILES;
+
+    /* prevent reentrant calls while a batch is in progress */
+    if (g_batch_active && g_tx_queue.count > 0) {
+        str_data_t *err = make_str_data("transfer in progress");
+        if (err) lv_async_call(cb_show_error_popup, err);
+        return false;
+    }
 
     /* reset cancelled flag so queue is usable after a prior cancel */
     tx_queue_reset(&g_tx_queue);
@@ -1375,6 +1408,7 @@ bool network_cmd_put_multi(const char **filenames, int count)
         g_batch_total  = valid_count;
         g_batch_done   = 0;
         g_batch_active = true;
+        g_batch_is_upload = true;
         printf("[DEBUG] put_multi: enqueued %d files\n", valid_count);
     }
     return valid_count > 0;

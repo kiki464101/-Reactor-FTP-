@@ -451,6 +451,14 @@ void ui_show_progress_batch(void)
     lv_obj_t *parent = ui_get_window_parent();
     if (!parent) return;
 
+    /* if old popup was hidden, destroy it so we can create a fresh one */
+    if (batch_prog_panel && lv_obj_has_flag(batch_prog_panel, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_del(batch_prog_panel);
+        batch_prog_panel = NULL;
+        memset(prog_slots, 0, sizeof(prog_slots));
+        batch_prog_count = 0;
+    }
+
     /* don't duplicate */
     if (batch_prog_panel || prog_panel) return;
 
@@ -802,7 +810,6 @@ static void on_download_btn_clicked(lv_event_t *e)
         files[i] = g_selected_remote[i];
 
     ui_set_status("Downloading...");
-    ui_show_progress_batch(); /* show popup synchronously on UI thread */
     if (!network_cmd_get_multi(files, g_remote_sel_count))
         ui_show_error("Failed to start download");
 }
@@ -820,7 +827,6 @@ static void on_upload_btn_clicked(lv_event_t *e)
         files[i] = g_selected_local[i];
 
     ui_set_status("Uploading...");
-    ui_show_progress_batch(); /* show popup synchronously on UI thread */
     if (!network_cmd_put_multi(files, g_local_sel_count))
         ui_show_error("No valid files to upload");
 }
@@ -929,6 +935,29 @@ static void on_delete_confirm_no_btn_clicked(lv_event_t *e)
     if (confirm_popup) { lv_obj_del(confirm_popup); confirm_popup = NULL; }
 }
 
+/* Recursively remove a file or directory */
+static int remove_recursive(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+
+    if (S_ISDIR(st.st_mode)) {
+        DIR *dir = opendir(path);
+        if (!dir) return -1;
+        struct dirent *d;
+        while ((d = readdir(dir)) != NULL) {
+            if (strcmp(d->d_name, ".") == 0 || strcmp(d->d_name, "..") == 0)
+                continue;
+            char child[520];
+            snprintf(child, sizeof(child), "%s/%s", path, d->d_name);
+            remove_recursive(child);
+        }
+        closedir(dir);
+        return rmdir(path);
+    }
+    return unlink(path);
+}
+
 /* ================================================================== */
 /*  execute_local_delete — extracted deletion logic (fixed paths)      */
 /* ================================================================== */
@@ -939,20 +968,15 @@ static void execute_local_delete(void)
 
     for (int i = 0; i < g_local_sel_count; i++) {
         char *name = g_selected_local[i];
-        size_t nlen = strlen(name);
-
-        /* skip directory entries (end with "/") */
-        if (nlen > 0 && name[nlen - 1] == '/') {
-            fail++;
-            continue;
-        }
-
         /* g_selected_local[i] already contains the subdirectory prefix
          * (e.g. "load/haha.txt"), so just prepend "./client/" once. */
         char path[520];
         snprintf(path, sizeof(path), "./client/%s", name);
+        /* strip trailing '/' for remove_recursive */
+        size_t plen = strlen(path);
+        if (plen > 0 && path[plen - 1] == '/') path[plen - 1] = '\0';
 
-        if (remove(path) == 0)
+        if (remove_recursive(path) == 0)
             success++;
         else
             fail++;
@@ -1016,6 +1040,11 @@ void ui_show_error_popup(const char *msg)
         confirm_popup = NULL;
     }
 
+    /* hide progress popup if visible to avoid stacking */
+    if (batch_prog_panel && !lv_obj_has_flag(batch_prog_panel, LV_OBJ_FLAG_HIDDEN)) {
+        lv_obj_add_flag(batch_prog_panel, LV_OBJ_FLAG_HIDDEN);
+    }
+
     err_popup = lv_obj_create(parent);
     lv_obj_set_size(err_popup, 280, 150);
     lv_obj_center(err_popup);
@@ -1047,17 +1076,10 @@ static void on_close_progress_btn_clicked(lv_event_t *e)
 {
     (void)e;
     if (batch_prog_panel) {
-        lv_obj_del(batch_prog_panel);
-        batch_prog_panel = NULL;
-        memset(prog_slots, 0, sizeof(prog_slots));
-        batch_prog_count = 0;
+        lv_obj_add_flag(batch_prog_panel, LV_OBJ_FLAG_HIDDEN);
     }
     if (prog_panel) {
-        lv_obj_del(prog_panel);
-        prog_panel = NULL;
-        prog_label = NULL;
-        prog_bar   = NULL;
-        prog_info  = NULL;
+        lv_obj_add_flag(prog_panel, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -1217,6 +1239,18 @@ static char *scan_local_directory(const char *subpath)
     }
     closedir(dir);
     return buf;
+}
+
+void ui_refresh_local_files_root(void)
+{
+    g_local_cur_path[0] = '\0';
+    ui_refresh_local_files();
+}
+
+void ui_refresh_remote_list_root(void)
+{
+    g_remote_cur_path[0] = '\0';
+    network_cmd_ls(NULL);
 }
 
 void ui_refresh_local_files(void)
