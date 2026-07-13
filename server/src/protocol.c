@@ -61,6 +61,25 @@ unsigned char *read_packet(int fd, int *payload_len)
 }
 
 /* ------------------------------------------------------------------ */
+/*  write_all – 循环写入直到所有数据写完或出错                          */
+/*  处理 write() 可能产生的部分写和 EINTR 中断                          */
+/* ------------------------------------------------------------------ */
+static int write_all(int fd, const void *buf, size_t n)
+{
+    size_t total = 0;
+    const char *ptr = (const char *)buf;
+    while (total < n) {
+        ssize_t w = write(fd, ptr + total, n - total);
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        total += (size_t)w;
+    }
+    return (int)total;
+}
+
+/* ------------------------------------------------------------------ */
 /*  send_packet – 构建并发送一个响应数据包                              */
 /*  将命令号、结果码和数据组装成协议格式后写入文件描述符                 */
 /* ------------------------------------------------------------------ */
@@ -90,7 +109,7 @@ int send_packet(int fd, int cmd_no, int res_result,
     }
     pkt[i++] = 0xC0;
 
-    int ret = (int)write(fd, pkt, (size_t)pkg_len);
+    int ret = write_all(fd, pkt, (size_t)pkg_len);
     free(pkt);
     return (ret == pkg_len) ? 0 : -1;
 }

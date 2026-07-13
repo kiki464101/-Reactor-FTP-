@@ -913,6 +913,11 @@ static void start_upload(const char *filename, const char *local_path)
     g_ul_total = (int)sz;
     g_ul_sent  = 0;
 
+    fprintf(stderr, "[upload] start: %s fd=%d total=%d\n", local_path, g_ul_fd, g_ul_total);
+    if (g_ul_total <= 0) {
+        fprintf(stderr, "[upload] WARNING: g_ul_total=%d <= 0!\n", g_ul_total);
+    }
+
     /* 初始化全局传输进度 */
     g_transfer_progress.active  = true;
     g_transfer_progress.is_upload = true;
@@ -1057,6 +1062,7 @@ static int handle_upload_chunk(void)
         return -1;                                      /* 网络错误 */
     }
     g_ul_sent += w;
+    fprintf(stderr, "[upload chunk] r=%d w=%d sent=%d/%d\n", r, w, g_ul_sent, g_ul_total);
     usleep(CHUNK_DELAY_US);                              /* 100ms 延迟让进度条可见 */
     update_ul_progress();
     return 0;
@@ -1575,12 +1581,6 @@ bool network_cmd_put(const char *filename, const char *local_path)
     if (!S_ISREG(st.st_mode)) return false;
     int filesize = (int)st.st_size;
 
-    g_ul_filename[0] = '\0';
-    strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
-    g_ul_local_path[0] = '\0';
-    strncpy(g_ul_local_path, local_path, sizeof(g_ul_local_path) - 1);
-    g_state = ST_WAIT_PUT_RESP;                          /* 进入等待 PUT 响应状态 */
-
     /* 提取文件名（仅基本名称），本地读取仍使用完整路径 */
     const char *base = strrchr(filename, '/');
     base = base ? base + 1 : filename;
@@ -1592,10 +1592,16 @@ bool network_cmd_put(const char *filename, const char *local_path)
         return false;                                    /* 重复文件，拒绝上传 */
     }
 
+    g_ul_filename[0] = '\0';
+    strncpy(g_ul_filename, filename, sizeof(g_ul_filename) - 1);
+    g_ul_local_path[0] = '\0';
+    strncpy(g_ul_local_path, local_path, sizeof(g_ul_local_path) - 1);
+    g_state = ST_WAIT_PUT_RESP;                          /* 进入等待 PUT 响应状态 */
+
     int len;
     unsigned char *pkt = build_cmd_put(filename, filesize, &len);
     if (!pkt) return false;
-    write(g_sockfd, pkt, (size_t)len);
+    if (write_all(g_sockfd, pkt, (size_t)len) < 0) { free(pkt); return false; }
     free(pkt);
     return true;
 }

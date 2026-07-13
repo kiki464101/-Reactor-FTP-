@@ -511,6 +511,7 @@ void worker_handle_put(client_session_t *sess,
 
     /* 发送确认包，通知客户端可以开始发送文件数据 */
     ack_ok(sess, FTP_CMD_PUT);
+    fprintf(stderr, "[srv put] ACK sent, waiting for %d bytes from fd=%d\n", filesize, sess->fd);
 
     shm_update_status(sess->shm, sess->fd, "Uploading 0%");
 
@@ -524,8 +525,14 @@ void worker_handle_put(client_session_t *sess,
         int chunk = (remaining < 4096) ? remaining : 4096;
         int r = (int)read(sess->fd, buf, (size_t)chunk);
         if (r <= 0) {
-            if (errno == EINTR) continue;
-            break;   /* 客户端断开连接或发生读取错误 */
+            fprintf(stderr, "[srv put] read fd=%d returned %d errno=%d, breaking (received=%d/%d)\n",
+                    sess->fd, r, errno, received, filesize);
+            if (errno == EINTR)  continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(1000);    /* fd is non-blocking, wait for data */
+                continue;
+            }
+            break;
         }
         int w = write_all(fd, buf, (size_t)r);
         if (w < 0) break;
