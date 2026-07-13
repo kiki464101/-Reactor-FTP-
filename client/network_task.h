@@ -38,7 +38,8 @@
 /*  描述单个待传输的文件（上传或下载）                                      */
 /* ------------------------------------------------------------------ */
 typedef struct {
-    char filename[256];             /* 文件路径（含相对路径）            */
+    char filename[256];             /* 服务器端路径（含相对路径）         */
+    char local_path[520];           /* 本地完整路径                       */
     bool is_upload;                 /* true=上传, false=下载             */
 } transfer_task_t;
 
@@ -143,10 +144,11 @@ bool network_cmd_get(const char *filename);
 
 /**
  * 发送 PUT 命令上传单个文件
- * @param filename  要上传的文件名
- * @return          true=命令发送成功, false=失败
+ * @param filename    要上传的文件名（发送给服务器）
+ * @param local_path  本地文件完整路径（用于 stat/open）
+ * @return            true=命令发送成功, false=失败
  */
-bool network_cmd_put(const char *filename);
+bool network_cmd_put(const char *filename, const char *local_path);
 
 /* ---- 多文件批量传输（将任务加入队列，由线程池处理） ---- */
 
