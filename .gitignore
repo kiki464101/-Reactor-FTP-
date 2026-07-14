@@ -1,16 +1,56 @@
+# ====================
 # 编译产物
+# ====================
 bin/
 build/
+server/build/
 *.o
 *.a
 *.so
 *.out
 *.exe
 
-# IDE 相关
+# CMake 生成文件
+server/cmake_install.cmake
+server/CMakeCache.txt
+server/CPackConfig.cmake
+server/CPackSourceConfig.cmake
+server/Makefile
+server/CMakeFiles/
+
+# ====================
+# 第三方库编译产物（保留源码，忽略编译中间文件）
+# ====================
+freetype-2.13.3/objs/
+freetype-2.13.3/*.a
+freetype-2.13.3/Makefile
+freetype-2.13.3/cmake_install.cmake
+freetype-2.13.3/CMakeFiles/
+freetype-2.13.3/freetype-config.cmake
+freetype-2.13.3/freetype-config-version.cmake
+freetype-2.13.3/freetype2.pc
+
+lvgl/CMakeFiles/
+lvgl/*.a
+lvgl/Makefile
+lvgl/cmake_install.cmake
+lvgl/lvgl.pc
+
+# ====================
+# IDE 配置
+# ====================
 .vscode/
 .idea/
+.trae/
 
-# 其他
+# ====================
+# 日志与临时文件
+# ====================
 *.log
 *.tmp
+
+# ====================
+# 系统文件
+# ====================
+.DS_Store
+Thumbs.db
