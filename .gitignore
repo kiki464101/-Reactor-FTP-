@@ -42,6 +42,8 @@ lvgl/lvgl.pc
 .vscode/
 .idea/
 .trae/
+.claude/
+.zcode/
 
 # ====================
 # 日志与临时文件
