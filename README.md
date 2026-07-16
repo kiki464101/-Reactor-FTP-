@@ -30,7 +30,7 @@
 ## 目录结构
 
 ```
-Ubantudemo/
+Ubuntudemo/
 ├── main.c                    # 客户端入口：LVGL初始化 + 事件循环
 ├── CMakeLists.txt            # 客户端CMake配置
 ├── Makefile                  # 客户端Makefile（备用）
